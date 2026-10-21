@@ -1,4 +1,4 @@
-import { PIXELS_PER_METER, GRID_SIZE, SNAP_DISTANCE, ROOM_FILL_COLORS } from './config.js';
+import { PIXELS_PER_METER, GRID_SIZE, SNAP_DISTANCE, ROOM_FILL_COLORS, FEATURES } from './config.js';
 import { createHistoryManager } from './history.js';
 import { saveProject, loadProject, importDxf } from './io.js';
 import { createDoorSymbol as createDoorSymbolBase, createWindowSymbol as createWindowSymbolBase, createStairsSymbol as createStairsSymbolBase, createDimensionObject as createDimensionObjectBase } from './symbols.js';
@@ -57,6 +57,8 @@ let roomColorIndex = 0;
     let clipboardData = null;
     let nudgeSaveTimer = null;
     let arrayTargetObject = null;
+    let chamferDistance = 0.3;
+    let filletRadius = 0.5;
     let customLayers = [];
     let isPanning = false;
     let lastPanPoint = null;
@@ -117,6 +119,70 @@ let roomColorIndex = 0;
         ctx.lineWidth = 0.5;
         ctx.strokeRect(0.5, 0.5, GRID_SIZE, GRID_SIZE);
         return new fabric.Pattern({ source: gridCanvas, repeat: 'repeat' });
+    }
+
+    function withAlpha(rgba, alpha) {
+        const match = rgba.match(/rgba?\(([\d.]+),\s*([\d.]+),\s*([\d.]+)/);
+        if (!match) return rgba;
+        return `rgba(${match[1]}, ${match[2]}, ${match[3]}, ${alpha})`;
+    }
+
+    function createHatchPattern(type, baseColor) {
+        const size = 16;
+        const c = document.createElement('canvas');
+        c.width = size; c.height = size;
+        const ctx = c.getContext('2d');
+        ctx.fillStyle = withAlpha(baseColor, 0.15);
+        ctx.fillRect(0, 0, size, size);
+        ctx.strokeStyle = withAlpha(baseColor, 0.9);
+        ctx.lineWidth = 1;
+        if (type === 'diagonal') {
+            ctx.beginPath();
+            ctx.moveTo(0, size); ctx.lineTo(size, 0);
+            ctx.moveTo(-size / 2, size / 2); ctx.lineTo(size / 2, -size / 2);
+            ctx.moveTo(size / 2, size * 1.5); ctx.lineTo(size * 1.5, size / 2);
+            ctx.stroke();
+        } else if (type === 'cross') {
+            ctx.beginPath();
+            ctx.moveTo(0, size / 2); ctx.lineTo(size, size / 2);
+            ctx.moveTo(size / 2, 0); ctx.lineTo(size / 2, size);
+            ctx.stroke();
+        } else if (type === 'dots') {
+            ctx.fillStyle = withAlpha(baseColor, 0.9);
+            ctx.beginPath();
+            ctx.arc(size / 2, size / 2, 1.5, 0, Math.PI * 2);
+            ctx.fill();
+        } else if (type === 'grid') {
+            ctx.strokeRect(0.5, 0.5, size - 1, size - 1);
+        }
+        return new fabric.Pattern({ source: c, repeat: 'repeat' });
+    }
+
+    function applyRoomFill(obj, fillTarget, pattern) {
+        const baseColor = (obj.data && obj.data.baseColor) || ROOM_FILL_COLORS[0];
+        obj.data.hatchPattern = pattern;
+        fillTarget.set('fill', pattern === 'solid' ? baseColor : createHatchPattern(pattern, baseColor));
+        canvas.renderAll();
+        saveState();
+    }
+
+    function createFillPatternSelect(obj, fillTarget) {
+        const propItem = document.createElement('div');
+        propItem.className = 'prop-item';
+        const label = document.createElement('label');
+        label.innerText = 'Fill Pattern';
+        propItem.appendChild(label);
+        const select = document.createElement('select');
+        [['solid', 'Solid'], ['diagonal', 'Diagonal Hatch'], ['cross', 'Cross Hatch'], ['dots', 'Dots'], ['grid', 'Tile Grid']].forEach(([value, text]) => {
+            const opt = document.createElement('option');
+            opt.value = value;
+            opt.innerText = text;
+            if ((obj.data && obj.data.hatchPattern || 'solid') === value) opt.selected = true;
+            select.appendChild(opt);
+        });
+        select.addEventListener('change', (e) => applyRoomFill(obj, fillTarget, e.target.value));
+        propItem.appendChild(select);
+        panelContent.appendChild(propItem);
     }
 
     function setupRulers() {
@@ -212,11 +278,170 @@ let roomColorIndex = 0;
         crosshairCtx.stroke();
     }
 
+    const historyList = document.getElementById('history-list');
+    const floorList = document.getElementById('floor-list');
+    let floors = [{ id: 'floor-1', name: 'Floor 1', json: null, history: null }];
+    let activeFloorId = 'floor-1';
+
+    function renderHistoryPanel() {
+        historyList.innerHTML = '';
+        historyManager.getEntries().forEach((entry, i) => {
+            const li = document.createElement('li');
+            li.className = 'history-item' + (entry.current ? ' current' : '') + (entry.future ? ' future' : '');
+            li.dataset.index = i;
+            const num = document.createElement('span');
+            num.className = 'history-num';
+            num.textContent = i + 1;
+            const text = document.createElement('span');
+            text.textContent = entry.label;
+            li.append(num, text);
+            historyList.appendChild(li);
+        });
+        const cur = historyList.querySelector('.current');
+        if (cur) historyList.scrollTop = Math.max(0, cur.offsetTop - historyList.clientHeight / 2);
+    }
+
     const historyManager = createHistoryManager(canvas, {
         undoBtn, redoBtn,
-        onRestore: () => { updatePropertiesPanel(canvas.getActiveObject()); drawRulers(); }
+        onRestore: () => { updatePropertiesPanel(canvas.getActiveObject()); drawRulers(); },
+        onChange: renderHistoryPanel
     });
     const { saveState, undo, redo, updateUndoRedoButtons } = historyManager;
+
+    historyList.addEventListener('click', (e) => {
+        const li = e.target.closest('.history-item');
+        if (li) historyManager.jumpTo(parseInt(li.dataset.index, 10));
+    });
+
+    function captureActiveFloor() {
+        const floor = floors.find(f => f.id === activeFloorId);
+        if (!floor) return;
+        floor.json = canvas.toJSON(['data', 'name']);
+        floor.history = historyManager.exportState();
+    }
+
+    function renderFloorList() {
+        floorList.innerHTML = '';
+        floors.forEach(f => {
+            const li = document.createElement('li');
+            li.className = 'floor-item' + (f.id === activeFloorId ? ' active' : '');
+            li.dataset.floor = f.id;
+            const name = document.createElement('span');
+            name.className = 'floor-name';
+            name.textContent = f.name;
+            name.title = 'Double-click to rename';
+            const actions = document.createElement('span');
+            actions.className = 'floor-actions';
+            const dup = document.createElement('span');
+            dup.className = 'floor-action floor-dup';
+            dup.title = 'Duplicate floor';
+            dup.innerHTML = ICON_STACK;
+            const del = document.createElement('span');
+            del.className = 'floor-action floor-del';
+            del.title = 'Delete floor';
+            del.innerHTML = ICON_X;
+            actions.append(dup, del);
+            li.append(name, actions);
+            floorList.appendChild(li);
+        });
+    }
+
+    function loadFloorIntoCanvas(floor, onDone) {
+        const finish = () => {
+            canvas.backgroundColor = createGridPattern();
+            canvas.renderAll();
+            syncLayerUI();
+            drawRulers();
+            updatePropertiesPanel(null);
+            if (floor.history && floor.history.history.length) historyManager.importState(floor.history);
+            else { historyManager.reset(); saveState('Start'); }
+            renderFloorList();
+            if (onDone) onDone();
+        };
+        if (floor.json) canvas.loadFromJSON(floor.json, finish);
+        else { canvas.clear(); finish(); }
+    }
+
+    function switchFloor(id) {
+        if (id === activeFloorId) return;
+        const target = floors.find(f => f.id === id);
+        if (!target) return;
+        setMode('select');
+        captureActiveFloor();
+        activeFloorId = id;
+        loadFloorIntoCanvas(target);
+    }
+
+    function addFloor() {
+        const name = prompt('New floor name:', `Floor ${floors.length + 1}`);
+        if (name === null) return;
+        const floor = { id: 'floor-' + Date.now().toString(36), name: name.trim() || `Floor ${floors.length + 1}`, json: null, history: null };
+        floors.push(floor);
+        switchFloor(floor.id);
+    }
+
+    function duplicateFloor(id) {
+        const src = floors.find(f => f.id === id);
+        if (!src) return;
+        setMode('select');
+        captureActiveFloor();
+        const copy = { id: 'floor-' + Date.now().toString(36), name: src.name + ' copy', json: src.json ? JSON.parse(JSON.stringify(src.json)) : null, history: null };
+        floors.splice(floors.indexOf(src) + 1, 0, copy);
+        switchFloor(copy.id);
+    }
+
+    function deleteFloor(id) {
+        if (floors.length <= 1) { alert('A project needs at least one floor.'); return; }
+        const idx = floors.findIndex(f => f.id === id);
+        if (idx < 0) return;
+        if (!confirm(`Delete "${floors[idx].name}"? This cannot be undone.`)) return;
+        const wasActive = id === activeFloorId;
+        floors.splice(idx, 1);
+        if (wasActive) {
+            const target = floors[Math.max(0, idx - 1)];
+            activeFloorId = target.id;
+            setMode('select');
+            loadFloorIntoCanvas(target);
+        } else {
+            renderFloorList();
+        }
+    }
+
+    function resetFloors() {
+        floors = [{ id: 'floor-1', name: 'Floor 1', json: null, history: null }];
+        activeFloorId = 'floor-1';
+        renderFloorList();
+    }
+
+    function getProjectMeta() {
+        captureActiveFloor();
+        return {
+            customLayers,
+            activeFloorId,
+            floors: floors.map(f => ({ id: f.id, name: f.name, json: f.id === activeFloorId ? null : f.json }))
+        };
+    }
+
+    floorList.addEventListener('click', (e) => {
+        const li = e.target.closest('.floor-item');
+        if (!li) return;
+        const id = li.dataset.floor;
+        if (e.target.closest('.floor-dup')) duplicateFloor(id);
+        else if (e.target.closest('.floor-del')) deleteFloor(id);
+        else switchFloor(id);
+    });
+
+    floorList.addEventListener('dblclick', (e) => {
+        const nameEl = e.target.closest('.floor-name');
+        if (!nameEl) return;
+        const floor = floors.find(f => f.id === nameEl.parentElement.dataset.floor);
+        if (!floor) return;
+        const name = prompt('Rename floor:', floor.name);
+        if (name && name.trim()) { floor.name = name.trim(); renderFloorList(); }
+    });
+
+    document.getElementById('add-floor-btn').addEventListener('click', addFloor);
+    renderFloorList();
     undoBtn.addEventListener('click', undo);
     redoBtn.addEventListener('click', redo);
 
@@ -434,6 +659,8 @@ let roomColorIndex = 0;
         createPropItem('Perimeter', perimeterM.toFixed(2), 'm');
         createPropItem('Area', areaM2.toFixed(2), 'm²');
         createPropItem('Angle', obj.angle.toFixed(0), '°', true, (newValue) => { obj.set('angle', newValue); canvas.renderAll(); });
+        if (!obj.data.baseColor) obj.data.baseColor = ROOM_FILL_COLORS[0];
+        createFillPatternSelect(obj, obj);
     }
 
     function renderRectProperties(obj) {
@@ -457,6 +684,8 @@ let roomColorIndex = 0;
         });
         createPropItem('Area', (widthMeters * heightMeters).toFixed(2), 'm²');
         createPropItem('Angle', obj.angle.toFixed(0), '°', true, (newValue) => { obj.set('angle', newValue); canvas.renderAll(); });
+        if (!obj.data.baseColor) obj.data.baseColor = rect.fill;
+        createFillPatternSelect(obj, rect);
     }
 
     function renderPolylineProperties(obj) {
@@ -469,6 +698,13 @@ let roomColorIndex = 0;
     }
     const lengthMeters = (totalLength / PIXELS_PER_METER).toFixed(2);
     createPropItem('Total Length', lengthMeters, 'm');
+    if (canRevertFillet(obj)) {
+        const revertBtn = document.createElement('button');
+        revertBtn.className = 'panel-action-btn';
+        revertBtn.textContent = 'Revert Last Fillet';
+        revertBtn.addEventListener('click', () => revertLastFillet(obj));
+        panelContent.appendChild(revertBtn);
+    }
 }
 
     function renderDimensionProperties(obj) {
@@ -509,6 +745,7 @@ let roomColorIndex = 0;
     }
 
     function finalizeWall() {
+    let wallAdded = false;
     if (wallPoints.length > 1) {
         const finalWall = new fabric.Polyline(wallPoints, {
             stroke: cssVar('--text-primary'),
@@ -520,6 +757,7 @@ let roomColorIndex = 0;
             strokeLineJoin: 'miter'
         });
         canvas.add(finalWall);
+        wallAdded = true;
     }
 
     canvas.getObjects().forEach(obj => {
@@ -535,6 +773,7 @@ let roomColorIndex = 0;
     toolTip.innerText = '';
     setMode('select');
     canvas.renderAll();
+    if (wallAdded) saveState('Add wall');
 }
     
     function updateRoomDimensions(roomGroup) {
@@ -574,6 +813,152 @@ let roomColorIndex = 0;
         const matrix = wall.calcTransformMatrix();
         const offset = wall.pathOffset || { x: 0, y: 0 };
         return wall.points.map(p => fabric.util.transformPoint({ x: p.x - offset.x, y: p.y - offset.y }, matrix));
+    }
+
+    function findNearestWallVertex(pointer, tolerance) {
+        let best = null;
+        canvas.getObjects().forEach(obj => {
+            if (!obj.data || obj.data.type !== 'wall-system') return;
+            const absPoints = getWallAbsPoints(obj);
+            for (let i = 1; i < absPoints.length - 1; i++) {
+                const dist = Math.hypot(absPoints[i].x - pointer.x, absPoints[i].y - pointer.y);
+                if (dist < tolerance && (!best || dist < best.dist)) {
+                    best = { wall: obj, vertexIndex: i, dist };
+                }
+            }
+        });
+        return best;
+    }
+
+    function chamferWallCorner(wall, vertexIndex, distanceM) {
+        const points = wall.points;
+        if (vertexIndex <= 0 || vertexIndex >= points.length - 1) return null;
+        const distPx = distanceM * PIXELS_PER_METER;
+        const prev = points[vertexIndex - 1];
+        const curr = points[vertexIndex];
+        const next = points[vertexIndex + 1];
+
+        const len1 = Math.hypot(curr.x - prev.x, curr.y - prev.y) || 1;
+        const len2 = Math.hypot(next.x - curr.x, next.y - curr.y) || 1;
+        const cutDist = Math.min(distPx, len1 * 0.45, len2 * 0.45);
+        if (cutDist <= 0) return null;
+
+        const p1 = {
+            x: curr.x - (curr.x - prev.x) / len1 * cutDist,
+            y: curr.y - (curr.y - prev.y) / len1 * cutDist,
+        };
+        const p2 = {
+            x: curr.x + (next.x - curr.x) / len2 * cutDist,
+            y: curr.y + (next.y - curr.y) / len2 * cutDist,
+        };
+
+        return points.slice(0, vertexIndex).concat([p1, p2], points.slice(vertexIndex + 1));
+    }
+
+
+    function wallAbsFromLocal(wall, localPoints) {
+        const matrix = wall.calcTransformMatrix();
+        const offset = wall.pathOffset || { x: 0, y: 0 };
+        return localPoints.map(p => fabric.util.transformPoint({ x: p.x - offset.x, y: p.y - offset.y }, matrix));
+    }
+
+    function wallFromAbsPoints(src, absPoints, data) {
+        return new fabric.Polyline(absPoints.map(p => ({ x: p.x, y: p.y })), {
+            stroke: src.stroke, strokeWidth: src.strokeWidth,
+            strokeLineJoin: 'miter', fill: null, selectable: true, objectCaching: false,
+            data: data
+        });
+    }
+
+    function filletAbsPoints(absPoints, vertexIndex, radiusM) {
+        if (vertexIndex <= 0 || vertexIndex >= absPoints.length - 1) return null;
+        const P = absPoints[vertexIndex];
+        const A = absPoints[vertexIndex - 1];
+        const B = absPoints[vertexIndex + 1];
+        const l1 = Math.hypot(A.x - P.x, A.y - P.y);
+        const l2 = Math.hypot(B.x - P.x, B.y - P.y);
+        if (l1 < 1e-6 || l2 < 1e-6) return { error: 'degenerate' };
+        const u = { x: (A.x - P.x) / l1, y: (A.y - P.y) / l1 };
+        const v = { x: (B.x - P.x) / l2, y: (B.y - P.y) / l2 };
+        const theta = Math.acos(Math.max(-1, Math.min(1, u.x * v.x + u.y * v.y)));
+        if (theta < 0.05 || Math.PI - theta < 0.3) return { error: 'flat' };
+        const half = theta / 2;
+        let radius = radiusM * PIXELS_PER_METER;
+        let t = radius / Math.tan(half);
+        const tMax = Math.min(l1 * (vertexIndex - 1 > 0 ? 0.5 : 0.98), l2 * (vertexIndex + 1 < absPoints.length - 1 ? 0.5 : 0.98));
+        let clamped = false;
+        if (t > tMax) { t = tMax; radius = t * Math.tan(half); clamped = true; }
+        const T1 = { x: P.x + u.x * t, y: P.y + u.y * t };
+        const T2 = { x: P.x + v.x * t, y: P.y + v.y * t };
+        const bx = u.x + v.x;
+        const by = u.y + v.y;
+        const bl = Math.hypot(bx, by) || 1;
+        const dist = radius / Math.sin(half);
+        const C = { x: P.x + bx / bl * dist, y: P.y + by / bl * dist };
+        const a1 = Math.atan2(T1.y - C.y, T1.x - C.x);
+        let delta = Math.atan2(T2.y - C.y, T2.x - C.x) - a1;
+        while (delta > Math.PI) delta -= 2 * Math.PI;
+        while (delta < -Math.PI) delta += 2 * Math.PI;
+        const steps = Math.max(3, Math.ceil(Math.abs(delta) / (Math.PI / 18)));
+        const arc = [];
+        for (let k = 0; k <= steps; k++) {
+            const a = a1 + delta * k / steps;
+            arc.push({ x: C.x + radius * Math.cos(a), y: C.y + radius * Math.sin(a) });
+        }
+        arc[0] = T1;
+        arc[steps] = T2;
+        return { points: absPoints.slice(0, vertexIndex).concat(arc, absPoints.slice(vertexIndex + 1)), clamped: clamped, radius: radius / PIXELS_PER_METER };
+    }
+
+    function applyFillet(wall, vertexIndex, radiusM) {
+        const absBefore = getWallAbsPoints(wall);
+        const result = filletAbsPoints(absBefore, vertexIndex, radiusM);
+        if (!result || result.error) return result || { error: 'invalid' };
+        const previous = (wall.data && Array.isArray(wall.data.filletUndo)) ? wall.data.filletUndo : [];
+        const stack = previous.map(e => ({ before: wallAbsFromLocal(wall, e.before), after: wallAbsFromLocal(wall, e.after) }));
+        stack.push({ before: absBefore.map(p => ({ x: p.x, y: p.y })), after: result.points.map(p => ({ x: p.x, y: p.y })) });
+        const newWall = wallFromAbsPoints(wall, result.points, { layer: wall.data.layer, type: 'wall-system', filletUndo: stack.slice(-10) });
+        canvas.remove(wall);
+        canvas.add(newWall);
+        setActiveAndSync(newWall);
+        canvas.renderAll();
+        saveState('Fillet corner');
+        return { ok: true, clamped: result.clamped, radius: result.radius };
+    }
+
+    function wallPointsMatch(a, b) {
+        if (a.length !== b.length) return false;
+        for (let i = 0; i < a.length; i++) {
+            if (Math.abs(a[i].x - b[i].x) > 1e-6 || Math.abs(a[i].y - b[i].y) > 1e-6) return false;
+        }
+        return true;
+    }
+
+    function canRevertFillet(wall) {
+        const stack = wall.data && wall.data.filletUndo;
+        if (!Array.isArray(stack) || !stack.length) return false;
+        return wallPointsMatch(wall.points, stack[stack.length - 1].after);
+    }
+
+    function revertLastFillet(wall) {
+        if (!canRevertFillet(wall)) return false;
+        const stack = wall.data.filletUndo;
+        const last = stack[stack.length - 1];
+        const absBefore = wallAbsFromLocal(wall, last.before);
+        const rest = stack.slice(0, -1).map(e => ({ before: wallAbsFromLocal(wall, e.before), after: wallAbsFromLocal(wall, e.after) }));
+        const data = { layer: wall.data.layer, type: 'wall-system' };
+        if (rest.length) data.filletUndo = rest;
+        const restored = wallFromAbsPoints(wall, absBefore, data);
+        if (rest.length) {
+            const restoredAbs = absBefore.map(p => ({ x: p.x, y: p.y }));
+            restored.data.filletUndo[rest.length - 1].after = restoredAbs;
+        }
+        canvas.remove(wall);
+        canvas.add(restored);
+        setActiveAndSync(restored);
+        canvas.renderAll();
+        saveState('Revert fillet');
+        return true;
     }
 
     function offsetWallPoints(points, delta) {
@@ -680,7 +1065,7 @@ let roomColorIndex = 0;
                     left, top, angle,
                     originX: 'left', originY: 'top',
                     selectable: true,
-                    data: { layer: 'walls', type: 'room' }
+                    data: { layer: 'walls', type: 'room', baseColor: fillColor, hatchPattern: 'solid' }
                 });
                 canvas.add(roomGroup);
                 setActiveAndSync(roomGroup);
@@ -852,7 +1237,7 @@ let roomColorIndex = 0;
             canvas.setCursor('grabbing');
             return;
         }
-        if (o.target && o.target.selectable && currentMode !== 'select' && currentMode !== 'text' && currentMode !== 'measure') return;
+        if (o.target && o.target.selectable && currentMode !== 'select' && currentMode !== 'text' && currentMode !== 'measure' && currentMode !== 'chamfer-active' && currentMode !== 'fillet-active') return;
         if (o.target && currentMode === 'select') return;
 
         const pointer = canvas.getPointer(o.e);
@@ -899,6 +1284,52 @@ let roomColorIndex = 0;
                 createDimensionObject(dimensionFirstPoint, snappedPointer);
                 dimensionFirstPoint = null;
                 setMode('select');
+            }
+            return;
+        }
+
+        if (currentMode === 'chamfer-active') {
+            const found = findNearestWallVertex(pointer, 20);
+            if (found) {
+                const newPoints = chamferWallCorner(found.wall, found.vertexIndex, chamferDistance);
+                if (newPoints) {
+                    const newWall = new fabric.Polyline(newPoints, {
+                        left: found.wall.left, top: found.wall.top, angle: found.wall.angle,
+                        scaleX: found.wall.scaleX, scaleY: found.wall.scaleY,
+                        stroke: found.wall.stroke, strokeWidth: found.wall.strokeWidth,
+                        strokeLineJoin: 'miter', fill: null, selectable: true, objectCaching: false,
+                        data: { layer: 'walls', type: 'wall-system' }
+                    });
+                    canvas.remove(found.wall);
+                    canvas.add(newWall);
+                    setActiveAndSync(newWall);
+                    canvas.renderAll();
+                    saveState('Chamfer corner');
+                    toolTip.innerText = 'Corner chamfered. Click another corner, or switch tools when done.';
+                } else {
+                    toolTip.innerText = 'That corner is too short to chamfer at this distance.';
+                }
+            } else {
+                toolTip.innerText = 'No wall corner found nearby. Click closer to a bend in a wall.';
+            }
+            return;
+        }
+
+        if (currentMode === 'fillet-active') {
+            const found = findNearestWallVertex(pointer, 20);
+            if (found) {
+                const res = applyFillet(found.wall, found.vertexIndex, filletRadius);
+                if (res.ok) {
+                    toolTip.innerText = res.clamped
+                        ? `Corner rounded with a reduced radius of ${res.radius.toFixed(2)} m (the segments are short). Click another corner, or switch tools when done.`
+                        : 'Corner rounded. Click another corner, or switch tools when done.';
+                } else if (res.error === 'flat') {
+                    toolTip.innerText = 'That bend is too gentle to round.';
+                } else {
+                    toolTip.innerText = 'That corner cannot be rounded.';
+                }
+            } else {
+                toolTip.innerText = 'No wall corner found nearby. Click closer to a bend in a wall.';
             }
             return;
         }
@@ -1061,7 +1492,7 @@ let roomColorIndex = 0;
             }
             setActiveAndSync(cloned);
             canvas.renderAll();
-            saveState();
+            saveState('Paste');
         }, ['data']);
     }
 
@@ -1081,7 +1512,7 @@ let roomColorIndex = 0;
             }
             setActiveAndSync(cloned);
             canvas.renderAll();
-            saveState();
+            saveState('Duplicate');
         }, ['data']);
     }
 
@@ -1101,7 +1532,7 @@ let roomColorIndex = 0;
         group.set('data', { type: 'user-group' });
         canvas.requestRenderAll();
         updatePropertiesPanel(group);
-        saveState();
+        saveState('Group');
     }
 
     function ungroupSelection() {
@@ -1110,7 +1541,7 @@ let roomColorIndex = 0;
         active.toActiveSelection();
         canvas.requestRenderAll();
         updatePropertiesPanel(canvas.getActiveObject());
-        saveState();
+        saveState('Ungroup');
     }
 
     window.addEventListener('keydown', (e) => {
@@ -1196,9 +1627,9 @@ let roomColorIndex = 0;
 
     fileMenuBtn.addEventListener('click', (e) => { e.stopPropagation(); fileMenuDropdown.classList.toggle('show'); });
     window.addEventListener('click', () => { if (fileMenuDropdown.classList.contains('show')) fileMenuDropdown.classList.remove('show'); });
-    function clearCanvas() { if (confirm('Are you sure? All unsaved work will be lost.')) { canvas.clear(); layerList.querySelectorAll('.custom-layer-item').forEach(el => el.remove()); customLayers = []; historyManager.reset(); canvas.backgroundColor = createGridPattern(); canvas.renderAll(); syncLayerUI(); drawRulers(); saveState(); } }
+    function clearCanvas() { if (confirm('Are you sure? All unsaved work will be lost.')) { canvas.clear(); layerList.querySelectorAll('.custom-layer-item').forEach(el => el.remove()); customLayers = []; resetFloors(); historyManager.reset(); canvas.backgroundColor = createGridPattern(); canvas.renderAll(); syncLayerUI(); drawRulers(); saveState('New canvas'); } }
     newBtn.addEventListener('click', clearCanvas);
-    saveBtn.addEventListener('click', () => saveProject(canvas, { customLayers }));
+    saveBtn.addEventListener('click', () => saveProject(canvas, getProjectMeta()));
     loadBtn.addEventListener('click', () => fileInput.click());
     fileInput.addEventListener('change', (e) => {
         const file = e.target.files[0]; if (!file) return;
@@ -1208,7 +1639,15 @@ let roomColorIndex = 0;
             if (meta && Array.isArray(meta.customLayers)) {
                 meta.customLayers.forEach(l => addCustomLayer(l.name, l.id));
             }
-            canvas.backgroundColor = createGridPattern(); canvas.renderAll(); syncLayerUI(); drawRulers(); fileInput.value = ''; historyManager.reset(); saveState();
+            if (meta && Array.isArray(meta.floors) && meta.floors.length) {
+                floors = meta.floors.map(f => ({ id: String(f.id), name: String(f.name || 'Floor'), json: f.json || null, history: null }));
+                activeFloorId = floors.some(f => f.id === meta.activeFloorId) ? meta.activeFloorId : floors[0].id;
+            } else {
+                floors = [{ id: 'floor-1', name: 'Floor 1', json: null, history: null }];
+                activeFloorId = 'floor-1';
+            }
+            renderFloorList();
+            canvas.backgroundColor = createGridPattern(); canvas.renderAll(); syncLayerUI(); drawRulers(); fileInput.value = ''; historyManager.reset(); saveState('Open project');
         });
     });
     exportBtn.addEventListener('click', () => { modalOverlay.classList.remove('hidden'); modal.classList.remove('hidden'); });
@@ -1252,7 +1691,7 @@ let roomColorIndex = 0;
                 created.push(cloned);
                 if (created.length === count - 1) {
                     canvas.renderAll();
-                    saveState();
+                    saveState('Polar array');
                 }
             }, ['data']);
         }
@@ -1278,7 +1717,7 @@ let roomColorIndex = 0;
                 created.push(cloned);
                 if (created.length === count - 1) {
                     canvas.renderAll();
-                    saveState();
+                    saveState('Linear array');
                 }
             }, ['data']);
         }
@@ -1413,6 +1852,59 @@ let roomColorIndex = 0;
         setTimeout(() => window.print(), 200);
     });
 
+    const chamferModalOverlay = document.getElementById('chamfer-modal-overlay');
+    const chamferModal = document.getElementById('chamfer-modal');
+    function openChamferModal() { chamferModalOverlay.classList.remove('hidden'); chamferModal.classList.remove('hidden'); }
+    function closeChamferModal() { chamferModalOverlay.classList.add('hidden'); chamferModal.classList.add('hidden'); }
+    document.getElementById('close-chamfer-modal-btn').addEventListener('click', closeChamferModal);
+    chamferModalOverlay.addEventListener('click', closeChamferModal);
+
+    function activateChamferInteractiveMode() {
+        currentMode = 'chamfer-active';
+        canvas.discardActiveObject();
+        canvas.selection = false;
+        canvas.defaultCursor = 'crosshair';
+        canvas.renderAll();
+        toolTip.innerText = 'Click near a wall corner to chamfer it.';
+        toolButtons.forEach(btn => btn.classList.remove('active'));
+        document.getElementById('chamfer-tool-btn').classList.add('active');
+    }
+
+    document.getElementById('chamfer-apply-btn').addEventListener('click', () => {
+        chamferDistance = parseFloat(document.getElementById('chamfer-distance').value) || 0.3;
+        closeChamferModal();
+        activateChamferInteractiveMode();
+    });
+
+
+    const filletModalOverlay = document.getElementById('fillet-modal-overlay');
+    const filletModal = document.getElementById('fillet-modal');
+    function openFilletModal() { filletModalOverlay.classList.remove('hidden'); filletModal.classList.remove('hidden'); }
+    function closeFilletModal() { filletModalOverlay.classList.add('hidden'); filletModal.classList.add('hidden'); }
+    document.getElementById('close-fillet-modal-btn').addEventListener('click', closeFilletModal);
+    filletModalOverlay.addEventListener('click', closeFilletModal);
+
+    function activateFilletInteractiveMode() {
+        currentMode = 'fillet-active';
+        canvas.discardActiveObject();
+        canvas.selection = false;
+        canvas.defaultCursor = 'crosshair';
+        canvas.renderAll();
+        toolTip.innerText = 'Click near a wall corner to round it.';
+        toolButtons.forEach(btn => btn.classList.remove('active'));
+        document.getElementById('fillet-tool-btn').classList.add('active');
+    }
+
+    document.getElementById('fillet-apply-btn').addEventListener('click', () => {
+        filletRadius = parseFloat(document.getElementById('fillet-radius').value) || 0.5;
+        closeFilletModal();
+        activateFilletInteractiveMode();
+    });
+
+    if (!FEATURES.fillet) {
+        document.getElementById('fillet-tool-btn').remove();
+    }
+
     downloadBtn.addEventListener('click', () => {
         const format = document.querySelector('input[name="format"]:checked').value;
         const scale = parseFloat(document.getElementById('export-scale').value);
@@ -1427,7 +1919,7 @@ let roomColorIndex = 0;
     importDxfBtn.addEventListener('click', () => dxfFileInput.click());
     dxfFileInput.addEventListener('change', (e) => {
         const file = e.target.files[0]; if (!file) return;
-        importDxf(fabric, canvas, cssVar, file, () => saveState());
+        importDxf(fabric, canvas, cssVar, file, () => saveState('Import DXF'));
     });
     const themeToggleBtn = document.getElementById('theme-toggle-btn');
     function syncThemeIcon() {
@@ -1661,38 +2153,119 @@ let roomColorIndex = 0;
             { id: 'garden-cart', name: 'Garden Cart', file: 'garden-cart.svg', sizeMeters: 0.6 },
         ],
     };
-    const FURNITURE_ITEMS = Object.values(FURNITURE_CATALOG).flat();
+    const CUSTOM_SYMBOLS_KEY = 'naqshcad-custom-symbols';
+    const MAX_CUSTOM_SYMBOLS = 40;
+    const MAX_SVG_BYTES = 300 * 1024;
+    let customSymbols = [];
     let selectedAssetId = null;
+    let pendingSvg = null;
     const assetList = document.getElementById('asset-list');
 
-    Object.entries(FURNITURE_CATALOG).forEach(([category, items]) => {
-        const heading = document.createElement('div');
-        heading.className = 'asset-category-heading';
-        heading.textContent = category;
-        assetList.appendChild(heading);
-
-        const grid = document.createElement('div');
-        grid.className = 'asset-category-grid';
-        items.forEach(item => {
-            const el = document.createElement('div');
-            el.className = 'asset-item';
-            el.dataset.assetId = item.id;
-            el.title = item.name;
-            el.innerHTML = `<div class="asset-icon"></div><span class="asset-label">${item.name}</span>`;
-            if (item.file.endsWith('.png')) {
-                el.querySelector('.asset-icon').innerHTML = `<img src="assets/furniture/${item.file}" alt="${item.name}" draggable="false">`;
-            } else {
-                fetch(`assets/furniture/${item.file}`)
-                    .then(res => res.text())
-                    .then(svgText => { el.querySelector('.asset-icon').innerHTML = svgText; })
-                    .catch(() => {});
-            }
-            grid.appendChild(el);
+    function sanitizeSvg(text) {
+        const doc = new DOMParser().parseFromString(text, 'image/svg+xml');
+        const root = doc.documentElement;
+        if (!root || root.nodeName.toLowerCase() !== 'svg' || doc.querySelector('parsererror')) return null;
+        root.querySelectorAll('script, foreignObject, iframe, object, embed, audio, video, image, animate, set, animateTransform, animateMotion').forEach(n => n.remove());
+        root.querySelectorAll('style').forEach(s => { if (/@import|url\(/i.test(s.textContent)) s.remove(); });
+        root.querySelectorAll('*').forEach(el => {
+            Array.from(el.attributes).forEach(attr => {
+                const name = attr.name.toLowerCase();
+                const value = attr.value.trim().toLowerCase();
+                if (name.startsWith('on')) el.removeAttribute(attr.name);
+                else if ((name === 'href' || name === 'xlink:href') && !value.startsWith('#')) el.removeAttribute(attr.name);
+                else if (value.includes('javascript:') || /url\(\s*['"]?(?!#)/.test(value)) el.removeAttribute(attr.name);
+            });
         });
-        assetList.appendChild(grid);
-    });
+        if (!root.getAttribute('viewBox')) {
+            const w = parseFloat(root.getAttribute('width'));
+            const h = parseFloat(root.getAttribute('height'));
+            if (!(w > 0 && h > 0)) return null;
+            root.setAttribute('viewBox', `0 0 ${w} ${h}`);
+        }
+        root.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+        return new XMLSerializer().serializeToString(root);
+    }
+
+    try {
+        const stored = JSON.parse(localStorage.getItem(CUSTOM_SYMBOLS_KEY) || '[]');
+        if (Array.isArray(stored)) {
+            customSymbols = stored
+                .filter(s => s && s.id && typeof s.svg === 'string')
+                .map(s => ({ id: String(s.id), name: String(s.name || 'Symbol'), sizeMeters: parseFloat(s.sizeMeters) > 0 ? parseFloat(s.sizeMeters) : 0.6, svg: sanitizeSvg(s.svg) }))
+                .filter(s => s.svg);
+        }
+    } catch (err) {
+        customSymbols = [];
+    }
+
+    function persistCustomSymbols() {
+        try {
+            localStorage.setItem(CUSTOM_SYMBOLS_KEY, JSON.stringify(customSymbols));
+            return true;
+        } catch (err) {
+            return false;
+        }
+    }
+
+    function getCatalog() {
+        const catalog = {};
+        if (customSymbols.length) catalog['Custom'] = customSymbols.map(s => ({ id: s.id, name: s.name, custom: true, svg: s.svg, sizeMeters: s.sizeMeters }));
+        return Object.assign(catalog, FURNITURE_CATALOG);
+    }
+
+    function renderAssetList() {
+        assetList.innerHTML = '';
+        Object.entries(getCatalog()).forEach(([category, items]) => {
+            const heading = document.createElement('div');
+            heading.className = 'asset-category-heading';
+            heading.textContent = category;
+            assetList.appendChild(heading);
+
+            const grid = document.createElement('div');
+            grid.className = 'asset-category-grid';
+            items.forEach(item => {
+                const el = document.createElement('div');
+                el.className = 'asset-item';
+                if (item.id === selectedAssetId) el.classList.add('active');
+                el.dataset.assetId = item.id;
+                el.title = item.name;
+                el.innerHTML = '<div class="asset-icon"></div><span class="asset-label"></span>';
+                el.querySelector('.asset-label').textContent = item.name;
+                const icon = el.querySelector('.asset-icon');
+                if (item.custom) {
+                    icon.classList.add('custom');
+                    icon.innerHTML = item.svg;
+                    const del = document.createElement('button');
+                    del.className = 'asset-delete';
+                    del.title = 'Remove symbol';
+                    del.innerHTML = '&times;';
+                    el.appendChild(del);
+                } else if (item.file.endsWith('.png')) {
+                    icon.innerHTML = `<img src="assets/furniture/${item.file}" alt="${item.name}" draggable="false">`;
+                } else {
+                    fetch(`assets/furniture/${item.file}`)
+                        .then(res => res.text())
+                        .then(svgText => { icon.innerHTML = svgText; })
+                        .catch(() => {});
+                }
+                grid.appendChild(el);
+            });
+            assetList.appendChild(grid);
+        });
+    }
+
+    renderAssetList();
 
     assetList.addEventListener('click', (e) => {
+        const del = e.target.closest('.asset-delete');
+        if (del) {
+            const id = del.parentElement.dataset.assetId;
+            customSymbols = customSymbols.filter(s => s.id !== id);
+            persistCustomSymbols();
+            if (selectedAssetId === id) selectedAssetId = null;
+            renderAssetList();
+            return;
+        }
         const item = e.target.closest('.asset-item');
         if (!item) return;
         assetList.querySelectorAll('.asset-item').forEach(el => el.classList.remove('active'));
@@ -1700,6 +2273,70 @@ let roomColorIndex = 0;
         selectedAssetId = item.dataset.assetId;
         toolTip.innerText = `${item.title} selected — click on the canvas to place it.`;
     });
+
+    const svgModalOverlay = document.getElementById('svg-modal-overlay');
+    const svgModal = document.getElementById('svg-modal');
+    const svgFileInput = document.getElementById('svg-file-input');
+    function openSvgModal() { svgModalOverlay.classList.remove('hidden'); svgModal.classList.remove('hidden'); }
+    function closeSvgModal() { svgModalOverlay.classList.add('hidden'); svgModal.classList.add('hidden'); pendingSvg = null; }
+    document.getElementById('close-svg-modal-btn').addEventListener('click', closeSvgModal);
+    svgModalOverlay.addEventListener('click', closeSvgModal);
+    document.getElementById('import-svg-btn').addEventListener('click', () => svgFileInput.click());
+
+    svgFileInput.addEventListener('change', () => {
+        const file = svgFileInput.files[0];
+        svgFileInput.value = '';
+        if (!file) return;
+        if (file.size > MAX_SVG_BYTES) {
+            alert('This SVG is too large (limit 300 KB).');
+            return;
+        }
+        if (customSymbols.length >= MAX_CUSTOM_SYMBOLS) {
+            alert('The custom library is full. Remove a symbol first.');
+            return;
+        }
+        const reader = new FileReader();
+        reader.onload = (event) => {
+            const clean = sanitizeSvg(String(event.target.result));
+            if (!clean) {
+                alert('This file is not a usable SVG.');
+                return;
+            }
+            pendingSvg = clean;
+            document.getElementById('svg-preview').innerHTML = clean;
+            document.getElementById('svg-name').value = file.name.replace(/\.svg$/i, '').slice(0, 40);
+            openSvgModal();
+        };
+        reader.readAsText(file);
+    });
+
+    document.getElementById('svg-add-btn').addEventListener('click', () => {
+        if (!pendingSvg) return;
+        const name = document.getElementById('svg-name').value.trim() || 'Symbol';
+        const sizeMeters = parseFloat(document.getElementById('svg-size').value);
+        if (!(sizeMeters > 0)) {
+            alert('Enter a size greater than zero.');
+            return;
+        }
+        const symbol = { id: 'custom-' + Date.now().toString(36), name: name, sizeMeters: sizeMeters, svg: pendingSvg };
+        customSymbols.push(symbol);
+        if (!persistCustomSymbols()) {
+            customSymbols.pop();
+            alert('Could not save the symbol: browser storage is full or unavailable.');
+            return;
+        }
+        selectedAssetId = symbol.id;
+        pendingSvg = null;
+        closeSvgModal();
+        renderAssetList();
+        toolTip.innerText = `${name} selected — click on the canvas to place it.`;
+    });
+
+    function isBlackish(color) {
+        if (!color || typeof color !== 'string') return false;
+        const v = color.replace(/\s+/g, '').toLowerCase();
+        return v === '#000' || v === '#000000' || v === 'black' || v === 'rgb(0,0,0)' || v === 'currentcolor';
+    }
 
     function finalizeFurnitureObject(obj, itemDef, x, y) {
         const targetSizePx = itemDef.sizeMeters * PIXELS_PER_METER;
@@ -1721,9 +2358,18 @@ let roomColorIndex = 0;
     }
 
     function placeFurniture(assetId, x, y) {
-        const itemDef = FURNITURE_ITEMS.find(i => i.id === assetId);
+        const itemDef = Object.values(getCatalog()).flat().find(i => i.id === assetId);
         if (!itemDef) return;
-        if (itemDef.file.endsWith('.png')) {
+        if (itemDef.custom) {
+            fabric.loadSVGFromString(itemDef.svg, (objects, options) => {
+                if (!objects || !objects.length) return;
+                objects.forEach(o => {
+                    if (isBlackish(o.stroke)) o.set('stroke', cssVar('--text-primary'));
+                    if (isBlackish(o.fill)) o.set('fill', cssVar('--text-primary'));
+                });
+                finalizeFurnitureObject(fabric.util.groupSVGElements(objects, options), itemDef, x, y);
+            });
+        } else if (itemDef.file.endsWith('.png')) {
             fabric.Image.fromURL(`assets/furniture/${itemDef.file}`, (img) => {
                 finalizeFurnitureObject(img, itemDef, x, y);
             }, { crossOrigin: 'anonymous' });
@@ -1750,7 +2396,7 @@ let roomColorIndex = 0;
                 active.set('flipX', !active.flipX);
                 active.setCoords();
                 canvas.renderAll();
-                saveState();
+                saveState('Mirror');
             } else {
                 postModeMessage = 'Select an object first, then click Mirror.';
             }
@@ -1771,25 +2417,26 @@ let roomColorIndex = 0;
                 canvas.add(offsetWall);
                 setActiveAndSync(offsetWall);
                 canvas.renderAll();
-                saveState();
+                saveState('Offset wall');
             } else if (active && active.data && active.data.type === 'room') {
                 const ring = offsetPolygonPoints(active.getCoords(), GRID_SIZE);
                 if (ring) {
                     const minX = Math.min(...ring.map(p => p.x));
                     const minY = Math.min(...ring.map(p => p.y));
-                    const roomFill = (active._objects && active._objects[0]) ? active._objects[0].fill : ROOM_FILL_COLORS[0];
+                    const sourceBaseColor = (active.data && active.data.baseColor) || ((active._objects && active._objects[0]) ? active._objects[0].fill : ROOM_FILL_COLORS[0]);
+                    const sourceHatch = (active.data && active.data.hatchPattern) || 'solid';
                     const offsetRoom = new fabric.Polygon(ring.map(p => ({ x: p.x - minX, y: p.y - minY })), {
                         left: minX, top: minY,
-                        fill: roomFill,
+                        fill: sourceHatch === 'solid' ? sourceBaseColor : createHatchPattern(sourceHatch, sourceBaseColor),
                         stroke: cssVar('--text-primary'),
                         strokeWidth: 2,
                         selectable: true,
-                        data: { layer: 'walls', type: 'room' }
+                        data: { layer: 'walls', type: 'room', baseColor: sourceBaseColor, hatchPattern: sourceHatch }
                     });
                     canvas.add(offsetRoom);
                     setActiveAndSync(offsetRoom);
                     canvas.renderAll();
-                    saveState();
+                    saveState('Offset room');
                 } else {
                     postModeMessage = 'Offset distance is too large for this room.';
                 }
@@ -1803,7 +2450,7 @@ let roomColorIndex = 0;
                     canvas.add(cloned);
                     setActiveAndSync(cloned);
                     canvas.renderAll();
-                    saveState();
+                    saveState('Offset copy');
                 });
             } else {
                 postModeMessage = 'Select an object first, then click Offset.';
@@ -1817,6 +2464,12 @@ let roomColorIndex = 0;
             } else {
                 postModeMessage = 'Select a single object first, then click Array.';
             }
+            mode = 'select';
+        } else if (mode === 'chamfer') {
+            openChamferModal();
+            mode = 'select';
+        } else if (mode === 'fillet') {
+            openFilletModal();
             mode = 'select';
         }
 

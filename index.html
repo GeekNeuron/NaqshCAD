@@ -43,6 +43,8 @@
             <button class="tool-btn" id="measure-tool-btn" title="Quick Measure (Q)"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19.875 12c.621 0 1.125 .512 1.125 1.143v5.714c0 .631 -.504 1.143 -1.125 1.143h-15.875a1 1 0 0 1 -1 -1v-5.857c0 -.631 .504 -1.143 1.125 -1.143h15.75" /><path d="M9 12v2" /><path d="M6 12v3" /><path d="M12 12v3" /><path d="M18 12v3" /><path d="M15 12v2" /><path d="M3 3v4" /></svg></button>
             <button class="tool-btn" id="array-tool-btn" title="Array Copy"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5a1 1 0 1 0 2 0a1 1 0 1 0 -2 0" /><path d="M11 5a1 1 0 1 0 2 0a1 1 0 1 0 -2 0" /><path d="M18 5a1 1 0 1 0 2 0a1 1 0 1 0 -2 0" /><path d="M4 12a1 1 0 1 0 2 0a1 1 0 1 0 -2 0" /><path d="M11 12a1 1 0 1 0 2 0a1 1 0 1 0 -2 0" /><path d="M18 12a1 1 0 1 0 2 0a1 1 0 1 0 -2 0" /><path d="M4 19a1 1 0 1 0 2 0a1 1 0 1 0 -2 0" /><path d="M11 19a1 1 0 1 0 2 0a1 1 0 1 0 -2 0" /><path d="M18 19a1 1 0 1 0 2 0a1 1 0 1 0 -2 0" /></svg></button>
             <button class="tool-btn" id="text-tool-btn" title="Text (X)"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20l3 0" /><path d="M14 20l7 0" /><path d="M6.9 15l6.9 0" /><path d="M10.2 6.3l5.8 13.7" /><path d="M5 20l6 -16l2 0l7 16" /></svg></button>
+            <button class="tool-btn" id="chamfer-tool-btn" title="Chamfer Corner"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4 L16 4 L20 8 L20 20 L4 20 Z" /></svg></button>
+            <button class="tool-btn" id="fillet-tool-btn" title="Fillet Corner (rounded)"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 20v-8a8 8 0 0 1 8 -8h7" /></svg></button>
             <button class="tool-btn" id="asset-tool-btn" title="Place Furniture (A)"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 11a2 2 0 0 1 2 2v2h10v-2a2 2 0 1 1 4 0v4a2 2 0 0 1 -2 2h-14a2 2 0 0 1 -2 -2v-4a2 2 0 0 1 2 -2" /><path d="M5 11v-5a3 3 0 0 1 3 -3h8a3 3 0 0 1 3 3v5" /><path d="M6 19v2" /><path d="M18 19v2" /></svg></button>
         </aside>
 
@@ -53,6 +55,10 @@
 
         <div id="panel-backdrop"></div>
         <aside id="right-panel">
+            <div id="floors-panel">
+                <div class="panel-heading-row"><h3>Floors</h3><button id="add-floor-btn" title="Add Floor"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5l0 14" /><path d="M5 12l14 0" /></svg></button></div>
+                <ul id="floor-list"></ul>
+            </div>
             <div id="layers-panel">
                 <div class="panel-heading-row"><h3>Layers</h3><button id="add-layer-btn" title="Add Layer"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5l0 14" /><path d="M5 12l14 0" /></svg></button></div>
                 <ul id="layer-list">
@@ -63,7 +69,8 @@
                 </ul>
             </div>
             <div id="properties-panel"><h3>Properties</h3><div id="panel-content"><div id="panel-content-placeholder">Select an object.</div></div></div>
-            <div id="asset-panel-container" class="hidden"><h3>Assets</h3><div id="asset-list"></div></div>
+            <div id="history-panel"><h3>History</h3><ol id="history-list"></ol></div>
+            <div id="asset-panel-container" class="hidden"><h3>Assets</h3><button id="import-svg-btn" class="action-btn">Import SVG Symbol</button><input type="file" id="svg-file-input" accept=".svg,image/svg+xml" class="hidden"><div id="asset-list"></div></div>
         </aside>
 
         <footer id="status-bar">
@@ -131,7 +138,39 @@
         <div class="modal-footer"><button id="print-apply-btn" class="action-btn">Print</button></div>
     </div>
     <div id="print-container"><img id="print-image" alt="Print preview"></div>
+
+    <div id="chamfer-modal-overlay" class="hidden"></div>
+    <div id="chamfer-modal" class="hidden">
+        <div class="modal-header"><h2>Chamfer Corner</h2><button id="close-chamfer-modal-btn">&times;</button></div>
+        <div class="modal-body">
+            <div class="prop-item"><label for="chamfer-distance">Cut Distance (m)</label><input type="number" id="chamfer-distance" value="0.3" min="0.05" step="0.05"></div>
+            <div class="prop-hint">After clicking Apply, click near a corner on a selected wall to chamfer it.</div>
+        </div>
+        <div class="modal-footer"><button id="chamfer-apply-btn" class="action-btn">Apply</button></div>
+    </div>
     
+    <div id="fillet-modal-overlay" class="hidden"></div>
+    <div id="fillet-modal" class="hidden">
+        <div class="modal-header"><h2>Fillet Corner</h2><button id="close-fillet-modal-btn">&times;</button></div>
+        <div class="modal-body">
+            <div class="prop-item"><label for="fillet-radius">Radius (m)</label><input type="number" id="fillet-radius" value="0.5" min="0.05" step="0.05"></div>
+            <div class="prop-hint">After clicking Apply, click near a bend in a wall to round it. A wall's properties panel has a button to revert the last fillet.</div>
+        </div>
+        <div class="modal-footer"><button id="fillet-apply-btn" class="action-btn">Apply</button></div>
+    </div>
+
+    <div id="svg-modal-overlay" class="hidden"></div>
+    <div id="svg-modal" class="hidden">
+        <div class="modal-header"><h2>Import SVG Symbol</h2><button id="close-svg-modal-btn">&times;</button></div>
+        <div class="modal-body">
+            <div id="svg-preview"></div>
+            <div class="prop-item"><label for="svg-name">Name</label><input type="text" id="svg-name" maxlength="40"></div>
+            <div class="prop-item"><label for="svg-size">Size on plan (m, longest side)</label><input type="number" id="svg-size" value="0.6" min="0.05" step="0.05"></div>
+            <div class="prop-hint">The symbol is saved in this browser and appears under Custom in the Assets panel.</div>
+        </div>
+        <div class="modal-footer"><button id="svg-add-btn" class="action-btn">Add to Library</button></div>
+    </div>
+
     <script src="lib/fabric.min.js"></script>
     <script src="lib/dxf-parser.js"></script>
     <script src="lib/clipper.min.js"></script>
