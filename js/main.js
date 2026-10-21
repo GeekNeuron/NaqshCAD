@@ -1,5 +1,6 @@
 import { PIXELS_PER_METER, GRID_SIZE, SNAP_DISTANCE, ROOM_FILL_COLORS, FEATURES } from './config.js';
 import { createHistoryManager } from './history.js';
+import { buildGraph, graphStats, findFaces, faceInfo, mergeChains } from './wallgraph.js';
 import { saveProject, loadProject, importDxf } from './io.js';
 import { createDoorSymbol as createDoorSymbolBase, createWindowSymbol as createWindowSymbolBase, createStairsSymbol as createStairsSymbolBase, createDimensionObject as createDimensionObjectBase } from './symbols.js';
 
@@ -815,12 +816,17 @@ let roomColorIndex = 0;
         return wall.points.map(p => fabric.util.transformPoint({ x: p.x - offset.x, y: p.y - offset.y }, matrix));
     }
 
-    function findNearestWallVertex(pointer, tolerance) {
+    function isClosedPolyline(points) {
+        return points.length >= 4 && Math.hypot(points[0].x - points[points.length - 1].x, points[0].y - points[points.length - 1].y) < 1e-6;
+    }
+
+    function findNearestWallVertex(pointer, tolerance, includeClosedStart) {
         let best = null;
         canvas.getObjects().forEach(obj => {
             if (!obj.data || obj.data.type !== 'wall-system') return;
             const absPoints = getWallAbsPoints(obj);
-            for (let i = 1; i < absPoints.length - 1; i++) {
+            const from = includeClosedStart && isClosedPolyline(absPoints) ? 0 : 1;
+            for (let i = from; i < absPoints.length - 1; i++) {
                 const dist = Math.hypot(absPoints[i].x - pointer.x, absPoints[i].y - pointer.y);
                 if (dist < tolerance && (!best || dist < best.dist)) {
                     best = { wall: obj, vertexIndex: i, dist };
@@ -911,7 +917,11 @@ let roomColorIndex = 0;
     }
 
     function applyFillet(wall, vertexIndex, radiusM) {
-        const absBefore = getWallAbsPoints(wall);
+        let absBefore = getWallAbsPoints(wall);
+        if (vertexIndex === 0 && isClosedPolyline(absBefore)) {
+            absBefore = absBefore.slice(1).concat([absBefore[1]]);
+            vertexIndex = absBefore.length - 2;
+        }
         const result = filletAbsPoints(absBefore, vertexIndex, radiusM);
         if (!result || result.error) return result || { error: 'invalid' };
         const previous = (wall.data && Array.isArray(wall.data.filletUndo)) ? wall.data.filletUndo : [];
@@ -1237,7 +1247,7 @@ let roomColorIndex = 0;
             canvas.setCursor('grabbing');
             return;
         }
-        if (o.target && o.target.selectable && currentMode !== 'select' && currentMode !== 'text' && currentMode !== 'measure' && currentMode !== 'chamfer-active' && currentMode !== 'fillet-active') return;
+        if (o.target && o.target.selectable && currentMode !== 'select' && currentMode !== 'text' && currentMode !== 'measure' && currentMode !== 'chamfer-active' && currentMode !== 'fillet-active' && currentMode !== 'wall') return;
         if (o.target && currentMode === 'select') return;
 
         const pointer = canvas.getPointer(o.e);
@@ -1316,7 +1326,7 @@ let roomColorIndex = 0;
         }
 
         if (currentMode === 'fillet-active') {
-            const found = findNearestWallVertex(pointer, 20);
+            const found = findNearestWallVertex(pointer, 20, true);
             if (found) {
                 const res = applyFillet(found.wall, found.vertexIndex, filletRadius);
                 if (res.ok) {
@@ -1905,6 +1915,176 @@ let roomColorIndex = 0;
         document.getElementById('fillet-tool-btn').remove();
     }
 
+
+    const GRAPH_TOL = 4;
+    const MIN_ROOM_AREA_PX = 800;
+    const graphModalOverlay = document.getElementById('graph-modal-overlay');
+    const graphModal = document.getElementById('graph-modal');
+    const graphSummary = document.getElementById('graph-summary');
+    const graphMessage = document.getElementById('graph-message');
+
+    function collectWalls() {
+        return canvas.getObjects().filter(o => o.data && o.data.type === 'wall-system' && Array.isArray(o.points) && o.points.length >= 2);
+    }
+
+    function wallRecords(walls) {
+        return walls.map(w => ({
+            points: getWallAbsPoints(w).map(p => ({ x: p.x, y: p.y })),
+            thickness: w.strokeWidth || 1,
+            layer: (w.data && w.data.layer) || 'walls'
+        }));
+    }
+
+    function polygonArea(points) {
+        let sum = 0;
+        for (let i = 0; i < points.length; i++) {
+            const a = points[i];
+            const b = points[(i + 1) % points.length];
+            sum += a.x * b.y - b.x * a.y;
+        }
+        return Math.abs(sum / 2);
+    }
+
+    function analyzePlan() {
+        const walls = collectWalls();
+        const graph = buildGraph(wallRecords(walls), GRAPH_TOL);
+        const stats = graphStats(graph);
+        const rooms = findFaces(graph, MIN_ROOM_AREA_PX).map(face => {
+            const info = faceInfo(graph, face);
+            let netPoints = offsetPolygonPoints(face.points, -info.thickness / 2);
+            if (!netPoints || netPoints.length < 3 || polygonArea(netPoints) < 1) netPoints = face.points;
+            return { netPoints: netPoints, area: polygonArea(netPoints), perimeter: info.perimeter, key: info.key };
+        });
+        return { walls, graph, stats, rooms };
+    }
+
+    function toMeters(px) { return (px / PIXELS_PER_METER).toFixed(2); }
+    function toSquareMeters(px2) { return (px2 / (PIXELS_PER_METER * PIXELS_PER_METER)).toFixed(2); }
+
+    function graphRow(label, value) {
+        const row = document.createElement('div');
+        row.className = 'graph-row';
+        const a = document.createElement('span');
+        a.textContent = label;
+        const b = document.createElement('span');
+        b.textContent = value;
+        row.append(a, b);
+        return row;
+    }
+
+    function renderGraphSummary() {
+        const plan = analyzePlan();
+        graphSummary.innerHTML = '';
+        graphSummary.appendChild(graphRow('Wall objects', String(plan.walls.length)));
+        graphSummary.appendChild(graphRow('Wall segments (after splitting)', String(plan.stats.edges)));
+        graphSummary.appendChild(graphRow('Corners / junctions / free ends', `${plan.stats.bends} / ${plan.stats.junctions} / ${plan.stats.ends}`));
+        graphSummary.appendChild(graphRow('Total wall length', `${toMeters(plan.stats.totalLength)} m`));
+        graphSummary.appendChild(graphRow('Closed rooms found', String(plan.rooms.length)));
+        let total = 0;
+        if (plan.rooms.length) {
+            const heading = document.createElement('div');
+            heading.className = 'graph-heading';
+            heading.textContent = 'Net floor area (inside walls)';
+            graphSummary.appendChild(heading);
+            plan.rooms.forEach((room, i) => {
+                total += room.area;
+                graphSummary.appendChild(graphRow(`Room ${i + 1} (perimeter ${toMeters(room.perimeter)} m)`, `${toSquareMeters(room.area)} m²`));
+            });
+            graphSummary.appendChild(graphRow('Total floor area', `${toSquareMeters(total)} m²`));
+        }
+    }
+
+    function openGraphModal() {
+        graphMessage.textContent = '';
+        renderGraphSummary();
+        graphModalOverlay.classList.remove('hidden');
+        graphModal.classList.remove('hidden');
+    }
+
+    function closeGraphModal() {
+        graphModalOverlay.classList.add('hidden');
+        graphModal.classList.add('hidden');
+    }
+
+    document.getElementById('close-graph-modal-btn').addEventListener('click', closeGraphModal);
+    graphModalOverlay.addEventListener('click', closeGraphModal);
+
+    function detectRooms() {
+        const plan = analyzePlan();
+        const existing = canvas.getObjects().filter(o => o.data && o.data.type === 'room');
+        const existingKeys = new Set(existing.map(o => o.data.graphKey).filter(Boolean));
+        let created = 0;
+        let skipped = 0;
+        let stale = 0;
+        plan.rooms.forEach(room => {
+            if (existingKeys.has(room.key)) { skipped++; return; }
+            const pts = room.netPoints;
+            const minX = Math.min(...pts.map(p => p.x));
+            const minY = Math.min(...pts.map(p => p.y));
+            const cx = (minX + Math.max(...pts.map(p => p.x))) / 2;
+            const cy = (minY + Math.max(...pts.map(p => p.y))) / 2;
+            const sameSpot = existing.find(o => {
+                const c = o.getCenterPoint();
+                const area = o.type === 'polygon' ? polygonArea(o.points) * Math.abs(o.scaleX * o.scaleY) : o.getScaledWidth() * o.getScaledHeight();
+                return Math.hypot(c.x - cx, c.y - cy) < 0.3 * PIXELS_PER_METER && Math.abs(area - room.area) / room.area < 0.25;
+            });
+            if (sameSpot) {
+                skipped++;
+                if (sameSpot.data.graphKey) stale++;
+                return;
+            }
+            const color = ROOM_FILL_COLORS[roomColorIndex++ % ROOM_FILL_COLORS.length];
+            const polygon = new fabric.Polygon(pts.map(p => ({ x: p.x - minX, y: p.y - minY })), {
+                left: minX, top: minY,
+                fill: color,
+                stroke: cssVar('--text-primary'),
+                strokeWidth: 2,
+                selectable: true,
+                data: { layer: 'walls', type: 'room', baseColor: color, hatchPattern: 'solid', graphKey: room.key }
+            });
+            canvas.add(polygon);
+            created++;
+        });
+        if (created) {
+            canvas.discardActiveObject();
+            canvas.renderAll();
+            saveState('Detect rooms');
+        }
+        const staleNote = stale ? ` ${stale} detected room${stale > 1 ? 's have' : ' has'} a different shape now; delete ${stale > 1 ? 'them' : 'it'} and detect again to refresh.` : '';
+        graphMessage.textContent = (created
+            ? `Created ${created} room${created > 1 ? 's' : ''} from closed wall loops${skipped ? ` (${skipped} already existed)` : ''}.`
+            : (plan.rooms.length ? 'All closed loops already have a room.' : 'No closed wall loops found. Make sure the walls meet at their ends.')) + staleNote;
+        renderGraphSummary();
+    }
+
+    function mergeConnectedWalls() {
+        const walls = collectWalls();
+        const chains = mergeChains(wallRecords(walls), GRAPH_TOL);
+        if (!chains.length) {
+            graphMessage.textContent = 'No wall pieces to merge. Only two walls meeting end to end, with the same thickness and layer and nothing else touching the corner, are joined.';
+            return;
+        }
+        let pieces = 0;
+        chains.forEach(chain => {
+            const merged = wallFromAbsPoints(walls[chain.members[0]], chain.points, { layer: chain.layer, type: 'wall-system' });
+            chain.members.forEach(i => canvas.remove(walls[i]));
+            canvas.add(merged);
+            pieces += chain.members.length;
+        });
+        canvas.discardActiveObject();
+        canvas.renderAll();
+        saveState('Merge walls');
+        graphMessage.textContent = `Merged ${pieces} wall pieces into ${chains.length} continuous wall${chains.length > 1 ? 's' : ''}. Chamfer and Fillet now work across those corners.`;
+        renderGraphSummary();
+    }
+
+    document.getElementById('graph-rooms-btn').addEventListener('click', detectRooms);
+    document.getElementById('graph-merge-btn').addEventListener('click', mergeConnectedWalls);
+
+    if (!FEATURES.wallGraph) {
+        document.getElementById('graph-tool-btn').remove();
+    }
+
     downloadBtn.addEventListener('click', () => {
         const format = document.querySelector('input[name="format"]:checked').value;
         const scale = parseFloat(document.getElementById('export-scale').value);
@@ -2470,6 +2650,9 @@ let roomColorIndex = 0;
             mode = 'select';
         } else if (mode === 'fillet') {
             openFilletModal();
+            mode = 'select';
+        } else if (mode === 'graph') {
+            openGraphModal();
             mode = 'select';
         }
 

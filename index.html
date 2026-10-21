@@ -45,6 +45,7 @@
             <button class="tool-btn" id="text-tool-btn" title="Text (X)"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20l3 0" /><path d="M14 20l7 0" /><path d="M6.9 15l6.9 0" /><path d="M10.2 6.3l5.8 13.7" /><path d="M5 20l6 -16l2 0l7 16" /></svg></button>
             <button class="tool-btn" id="chamfer-tool-btn" title="Chamfer Corner"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4 L16 4 L20 8 L20 20 L4 20 Z" /></svg></button>
             <button class="tool-btn" id="fillet-tool-btn" title="Fillet Corner (rounded)"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 20v-8a8 8 0 0 1 8 -8h7" /></svg></button>
+            <button class="tool-btn" id="graph-tool-btn" title="Wall Graph: rooms, lengths, merge walls"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 16a2 2 0 1 0 4 0a2 2 0 1 0 -4 0" /><path d="M16 16a2 2 0 1 0 4 0a2 2 0 1 0 -4 0" /><path d="M10 6a2 2 0 1 0 4 0a2 2 0 1 0 -4 0" /><path d="M11 8l-4 6" /><path d="M13 8l4 6" /><path d="M8 17h8" /></svg></button>
             <button class="tool-btn" id="asset-tool-btn" title="Place Furniture (A)"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 11a2 2 0 0 1 2 2v2h10v-2a2 2 0 1 1 4 0v4a2 2 0 0 1 -2 2h-14a2 2 0 0 1 -2 -2v-4a2 2 0 0 1 2 -2" /><path d="M5 11v-5a3 3 0 0 1 3 -3h8a3 3 0 0 1 3 3v5" /><path d="M6 19v2" /><path d="M18 19v2" /></svg></button>
         </aside>
 
@@ -149,6 +150,16 @@
         <div class="modal-footer"><button id="chamfer-apply-btn" class="action-btn">Apply</button></div>
     </div>
     
+    <div id="graph-modal-overlay" class="hidden"></div>
+    <div id="graph-modal" class="hidden">
+        <div class="modal-header"><h2>Wall Graph</h2><button id="close-graph-modal-btn">&times;</button></div>
+        <div class="modal-body">
+            <div id="graph-summary"></div>
+            <div id="graph-message" class="prop-hint"></div>
+        </div>
+        <div class="modal-footer graph-footer"><button id="graph-merge-btn" class="action-btn">Merge Connected Walls</button><button id="graph-rooms-btn" class="action-btn">Detect Rooms</button></div>
+    </div>
+
     <div id="fillet-modal-overlay" class="hidden"></div>
     <div id="fillet-modal" class="hidden">
         <div class="modal-header"><h2>Fillet Corner</h2><button id="close-fillet-modal-btn">&times;</button></div>
