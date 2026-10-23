@@ -12,8 +12,8 @@
         <header id="app-header">
             <h1>NaqshCAD</h1>
             <div id="header-actions">
-                <div class="dropdown"><button id="file-menu-btn" class="header-btn">File</button><div id="file-menu-dropdown" class="dropdown-content"><a href="#" id="new-btn">New Canvas</a><a href="#" id="save-btn">Save Project</a><a href="#" id="load-btn">Load Project</a><a href="#" id="import-dxf-btn">Import DXF...</a><hr><a href="#" id="export-btn">Export Image...</a><a href="#" id="export-dxf-btn">Export as DXF</a><a href="#" id="print-btn">Print with Scale...</a></div></div>
-                <button id="theme-toggle-btn" class="header-btn" title="Toggle Theme"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 12a4 4 0 1 0 8 0a4 4 0 1 0 -8 0" /><path d="M3 12h1m8 -9v1m8 8h1m-9 8v1m-6.4 -15.4l.7 .7m12.1 -.7l-.7 .7m0 11.4l.7 .7m-12.1 -.7l-.7 .7" /></svg></button>
+                <div class="dropdown"><button id="file-menu-btn" class="header-btn">File</button><div id="file-menu-dropdown" class="dropdown-content"><a href="#" id="new-btn">New Canvas</a><a href="#" id="save-btn">Save Project</a><a href="#" id="load-btn">Load Project</a><a href="#" id="import-dxf-btn">Import DXF...</a><hr><a href="#" id="export-btn">Export Image...</a><a href="#" id="export-dxf-btn">Export as DXF</a><a href="#" id="export-all-dxf-btn">Export All Floors as DXF</a><a href="#" id="export-png-btn">Export Image (PNG)</a><a href="#" id="export-svg-btn">Export Vector (SVG)</a><a href="#" id="export-pdf-btn">Export PDF (all floors)</a><a href="#" id="report-btn">Schedule and Plan Checks</a><a href="#" id="view3d-btn">3D Preview</a><a href="#" id="share-btn">Copy Share Link</a><a href="#" id="compare-btn">Compare with File</a><a href="#" id="print-btn">Print with Scale...</a></div></div>
+                <button id="settings-btn" class="header-btn" title="Settings"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.325 4.317c.426 -1.756 2.924 -1.756 3.35 0a1.724 1.724 0 0 0 2.573 1.066c1.543 -.94 3.31 .826 2.37 2.37a1.724 1.724 0 0 0 1.065 2.572c1.756 .426 1.756 2.924 0 3.35a1.724 1.724 0 0 0 -1.066 2.573c.94 1.543 -.826 3.31 -2.37 2.37a1.724 1.724 0 0 0 -2.572 1.065c-.426 1.756 -2.924 1.756 -3.35 0a1.724 1.724 0 0 0 -2.573 -1.066c-1.543 .94 -3.31 -.826 -2.37 -2.37a1.724 1.724 0 0 0 -1.065 -2.572c-1.756 -.426 -1.756 -2.924 0 -3.35a1.724 1.724 0 0 0 1.066 -2.573c-.94 -1.543 .826 -3.31 2.37 -2.37c1 .608 2.296 .07 2.572 -1.065z" /><path d="M9 12a3 3 0 1 0 6 0a3 3 0 1 0 -6 0" /></svg></button>
                 <button id="undo-btn" class="header-btn" title="Undo (Ctrl+Z)" disabled><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 14l-4 -4l4 -4" /><path d="M5 10h11a4 4 0 1 1 0 8h-1" /></svg></button>
                 <button id="redo-btn" class="header-btn" title="Redo (Ctrl+Y)" disabled><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 14l4 -4l-4 -4" /><path d="M19 10h-11a4 4 0 1 0 0 8h1" /></svg></button>
                 <button id="panel-toggle-btn" class="header-btn" title="Toggle Panel"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6a2 2 0 0 1 2 -2h12a2 2 0 0 1 2 2v12a2 2 0 0 1 -2 2h-12a2 2 0 0 1 -2 -2l0 -12" /><path d="M15 4l0 16" /></svg></button>
@@ -46,6 +46,7 @@
             <button class="tool-btn" id="chamfer-tool-btn" title="Chamfer Corner"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4 L16 4 L20 8 L20 20 L4 20 Z" /></svg></button>
             <button class="tool-btn" id="fillet-tool-btn" title="Fillet Corner (rounded)"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 20v-8a8 8 0 0 1 8 -8h7" /></svg></button>
             <button class="tool-btn" id="graph-tool-btn" title="Wall Graph: rooms, lengths, merge walls"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 16a2 2 0 1 0 4 0a2 2 0 1 0 -4 0" /><path d="M16 16a2 2 0 1 0 4 0a2 2 0 1 0 -4 0" /><path d="M10 6a2 2 0 1 0 4 0a2 2 0 1 0 -4 0" /><path d="M11 8l-4 6" /><path d="M13 8l4 6" /><path d="M8 17h8" /></svg></button>
+            <button class="tool-btn" id="node-tool-btn" title="Move Corner: drag a shared wall corner"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 12a2 2 0 1 0 4 0a2 2 0 1 0 -4 0" /><path d="M12 3v4" /><path d="M12 17v4" /><path d="M3 12h4" /><path d="M17 12h4" /></svg></button>
             <button class="tool-btn" id="asset-tool-btn" title="Place Furniture (A)"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 11a2 2 0 0 1 2 2v2h10v-2a2 2 0 1 1 4 0v4a2 2 0 0 1 -2 2h-14a2 2 0 0 1 -2 -2v-4a2 2 0 0 1 2 -2" /><path d="M5 11v-5a3 3 0 0 1 3 -3h8a3 3 0 0 1 3 3v5" /><path d="M6 19v2" /><path d="M18 19v2" /></svg></button>
         </aside>
 
@@ -59,6 +60,7 @@
             <div id="floors-panel">
                 <div class="panel-heading-row"><h3>Floors</h3><button id="add-floor-btn" title="Add Floor"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5l0 14" /><path d="M5 12l14 0" /></svg></button></div>
                 <ul id="floor-list"></ul>
+                <label id="ghost-floor-label"><input type="checkbox" id="ghost-floor-toggle"> Show floor below</label>
             </div>
             <div id="layers-panel">
                 <div class="panel-heading-row"><h3>Layers</h3><button id="add-layer-btn" title="Add Layer"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5l0 14" /><path d="M5 12l14 0" /></svg></button></div>
@@ -134,6 +136,7 @@
                 <option value="letter">Letter (21.6 x 27.9 cm)</option>
             </select></div>
             <div class="prop-item"><label>Orientation</label><div class="radio-group"><input type="radio" id="print-portrait" name="print-orientation" value="portrait" checked><label for="print-portrait">Portrait</label><input type="radio" id="print-landscape" name="print-orientation" value="landscape"><label for="print-landscape">Landscape</label></div></div>
+            <div class="prop-item"><label><input type="checkbox" id="print-all-floors"> Print all floors (one page each)</label></div>
             <div id="print-fit-hint" class="prop-hint"></div>
         </div>
         <div class="modal-footer"><button id="print-apply-btn" class="action-btn">Print</button></div>
@@ -150,14 +153,47 @@
         <div class="modal-footer"><button id="chamfer-apply-btn" class="action-btn">Apply</button></div>
     </div>
     
+    <div id="report-modal-overlay" class="hidden"></div>
+    <div id="report-modal" class="hidden">
+        <div class="modal-header"><h2>Schedule and Plan Checks</h2><button id="close-report-modal-btn">&times;</button></div>
+        <div id="report-body"></div>
+        <div class="modal-footer graph-footer"><button id="report-refresh-btn" class="action-btn">Refresh</button><button id="report-csv-btn" class="action-btn">Download CSV</button></div>
+    </div>
+
+    <div id="compare-modal-overlay" class="hidden"></div>
+    <div id="compare-modal" class="hidden">
+        <div class="modal-header"><h2>Compare with File</h2><button id="close-compare-modal-btn">&times;</button></div>
+        <div id="compare-body"></div>
+    </div>
+    <input type="file" id="compare-file-input" accept=".gncad,.json,application/json" class="hidden">
+
+    <div id="view3d-modal-overlay" class="hidden"></div>
+    <div id="view3d-modal" class="hidden">
+        <div class="modal-header"><h2>3D Preview</h2><button id="close-view3d-modal-btn">&times;</button></div>
+        <canvas id="view3d-canvas"></canvas>
+        <div id="view3d-controls">
+            <label>Wall height (m) <input type="number" id="view3d-height" value="2.7" min="2" max="6" step="0.1"></label>
+            <label><input type="checkbox" id="view3d-all" checked> All floors</label>
+            <button id="view3d-reset" class="action-btn">Reset view</button>
+        </div>
+    </div>
+
+    <div id="settings-modal-overlay" class="hidden"></div>
+    <div id="settings-modal" class="hidden">
+        <div class="modal-header"><h2>Settings</h2><button id="close-settings-modal-btn">&times;</button></div>
+        <div id="settings-body"></div>
+    </div>
+    <input type="file" id="settings-file-input" accept=".json,application/json" class="hidden">
+
     <div id="graph-modal-overlay" class="hidden"></div>
     <div id="graph-modal" class="hidden">
         <div class="modal-header"><h2>Wall Graph</h2><button id="close-graph-modal-btn">&times;</button></div>
         <div class="modal-body">
             <div id="graph-summary"></div>
+            <label id="graph-auto-label"><input type="checkbox" id="graph-auto-toggle"> Keep walls in graph form automatically</label>
             <div id="graph-message" class="prop-hint"></div>
         </div>
-        <div class="modal-footer graph-footer"><button id="graph-merge-btn" class="action-btn">Merge Connected Walls</button><button id="graph-rooms-btn" class="action-btn">Detect Rooms</button></div>
+        <div class="modal-footer graph-footer"><button id="graph-normalize-btn" class="action-btn">Normalize Walls</button><button id="graph-merge-btn" class="action-btn">Merge Connected Walls</button><button id="graph-rooms-btn" class="action-btn">Detect Rooms</button></div>
     </div>
 
     <div id="fillet-modal-overlay" class="hidden"></div>

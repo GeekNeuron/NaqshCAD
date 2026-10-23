@@ -1,6 +1,14 @@
 import { PIXELS_PER_METER, GRID_SIZE, SNAP_DISTANCE, ROOM_FILL_COLORS, FEATURES } from './config.js';
 import { createHistoryManager } from './history.js';
-import { buildGraph, graphStats, findFaces, faceInfo, mergeChains } from './wallgraph.js';
+import { setUnitSystem, lengthUnit, areaUnit, toDisplayLength, fromDisplayLength, toDisplayArea, formatLabel, formatLength, formatArea } from './units.js';
+import { setLanguage } from './i18n.js';
+import { buildPdf, dataUrlToBytes } from './pdf.js';
+import { DEFAULT_SETTINGS, SETTINGS_SCHEMA, loadSettings, saveSettings, sanitizeSettings } from './settings.js';
+import { buildSchedule, scheduleTotals, scheduleToCsv } from './schedule.js';
+import { runChecks } from './planCheck.js';
+import { encodeShare, decodeShare } from './share.js';
+import { createViewer } from './viewer3d.js';
+import { buildGraph, graphStats, findFaces, findOuterBoundaries, pointInPolygon, chainsFromGraph, faceInfo, mergeChains } from './wallgraph.js';
 import { saveProject, loadProject, importDxf } from './io.js';
 import { createDoorSymbol as createDoorSymbolBase, createWindowSymbol as createWindowSymbolBase, createStairsSymbol as createStairsSymbolBase, createDimensionObject as createDimensionObjectBase } from './symbols.js';
 
@@ -65,6 +73,7 @@ let roomColorIndex = 0;
     let lastPanPoint = null;
 
     const canvasContainer = document.getElementById('canvas-container');
+    let settings = loadSettings();
     const panelContent = document.getElementById('panel-content');
     const panelPlaceholder = document.getElementById('panel-content-placeholder');
     const assetPanel = document.getElementById('asset-panel-container');
@@ -116,9 +125,11 @@ let roomColorIndex = 0;
         gridCanvas.width = GRID_SIZE;
         gridCanvas.height = GRID_SIZE;
         const ctx = gridCanvas.getContext('2d');
-        ctx.strokeStyle = getComputedStyle(document.body).getPropertyValue('--grid-color').trim();
-        ctx.lineWidth = 0.5;
-        ctx.strokeRect(0.5, 0.5, GRID_SIZE, GRID_SIZE);
+        if (settings.showGrid) {
+            ctx.strokeStyle = getComputedStyle(document.body).getPropertyValue('--grid-color').trim();
+            ctx.lineWidth = 0.5;
+            ctx.strokeRect(0.5, 0.5, GRID_SIZE, GRID_SIZE);
+        }
         return new fabric.Pattern({ source: gridCanvas, repeat: 'repeat' });
     }
 
@@ -319,6 +330,47 @@ let roomColorIndex = 0;
         if (!floor) return;
         floor.json = canvas.toJSON(['data', 'name']);
         floor.history = historyManager.exportState();
+        floor.graph = FEATURES.graphPersist ? serializeWallGraph() : null;
+    }
+
+    let ghostObjects = [];
+    let ghostToken = 0;
+    let showGhost = false;
+    const ghostToggle = document.getElementById('ghost-floor-toggle');
+
+    function rebuildGhost() {
+        ghostObjects = [];
+        ghostToken++;
+        if (!FEATURES.ghostFloor || !showGhost) { canvas.requestRenderAll(); return; }
+        const idx = floors.findIndex(f => f.id === activeFloorId);
+        const below = idx > 0 ? floors[idx - 1] : null;
+        if (!below || !below.json || !Array.isArray(below.json.objects)) { canvas.requestRenderAll(); return; }
+        const wanted = below.json.objects.filter(o => o.data && ['wall-system', 'room', 'stairs'].includes(o.data.type));
+        const token = ghostToken;
+        fabric.util.enlivenObjects(JSON.parse(JSON.stringify(wanted)), (objs) => {
+            if (token !== ghostToken) return;
+            objs.forEach(o => { o.objectCaching = false; o.canvas = canvas; });
+            ghostObjects = objs;
+            canvas.requestRenderAll();
+        });
+    }
+
+    canvas.on('after:render', (opt) => {
+        if (!ghostObjects.length) return;
+        const ctx = canvas.getContext();
+        if (opt && opt.ctx && opt.ctx !== ctx) return;
+        const v = canvas.viewportTransform;
+        ctx.save();
+        ctx.transform(v[0], v[1], v[2], v[3], v[4], v[5]);
+        ctx.globalAlpha = 0.22;
+        ghostObjects.forEach(o => o.render(ctx));
+        ctx.restore();
+    });
+
+    if (FEATURES.ghostFloor) {
+        ghostToggle.addEventListener('change', () => { showGhost = ghostToggle.checked; updateSetting('showFloorBelow', showGhost); rebuildGhost(); });
+    } else {
+        document.getElementById('ghost-floor-label').remove();
     }
 
     function renderFloorList() {
@@ -345,6 +397,7 @@ let roomColorIndex = 0;
             li.append(name, actions);
             floorList.appendChild(li);
         });
+        rebuildGhost();
     }
 
     function loadFloorIntoCanvas(floor, onDone) {
@@ -354,6 +407,10 @@ let roomColorIndex = 0;
             syncLayerUI();
             drawRulers();
             updatePropertiesPanel(null);
+            if (FEATURES.graphPersist && floor.graphPending) {
+                floor.graphPending = false;
+                applyWallGraph(floor.graph);
+            }
             if (floor.history && floor.history.history.length) historyManager.importState(floor.history);
             else { historyManager.reset(); saveState('Start'); }
             renderFloorList();
@@ -395,7 +452,7 @@ let roomColorIndex = 0;
         if (floors.length <= 1) { alert('A project needs at least one floor.'); return; }
         const idx = floors.findIndex(f => f.id === id);
         if (idx < 0) return;
-        if (!confirm(`Delete "${floors[idx].name}"? This cannot be undone.`)) return;
+        if (!askConfirm(`Delete "${floors[idx].name}"? This cannot be undone.`)) return;
         const wasActive = id === activeFloorId;
         floors.splice(idx, 1);
         if (wasActive) {
@@ -419,7 +476,7 @@ let roomColorIndex = 0;
         return {
             customLayers,
             activeFloorId,
-            floors: floors.map(f => ({ id: f.id, name: f.name, json: f.id === activeFloorId ? null : f.json }))
+            floors: floors.map(f => ({ id: f.id, name: f.name, json: f.id === activeFloorId ? null : f.json, graph: f.graph || null }))
         };
     }
 
@@ -607,6 +664,14 @@ let roomColorIndex = 0;
     }
     
     function createPropItem(label, value, unit = '', isEditable = false, onchange = null) {
+        let convertBack = null;
+        if (unit === 'm' || unit === 'm²') {
+            const numeric = parseFloat(value);
+            if (isFinite(numeric)) {
+                if (unit === 'm') { value = toDisplayLength(numeric).toFixed(2); unit = lengthUnit(); convertBack = fromDisplayLength; }
+                else { value = toDisplayArea(numeric).toFixed(2); unit = areaUnit(); }
+            }
+        }
         const propItem = document.createElement('div');
         propItem.className = 'prop-item';
         const labelEl = document.createElement('label');
@@ -618,7 +683,7 @@ let roomColorIndex = 0;
         inputEl.type = isEditable ? 'number' : 'text';
         if (isEditable) {
             inputEl.value = value;
-            if (onchange) inputEl.addEventListener('change', (e) => onchange(parseFloat(e.target.value) || 0));
+            if (onchange) inputEl.addEventListener('change', (e) => { const entered = parseFloat(e.target.value) || 0; onchange(convertBack ? convertBack(entered) : entered); });
         } else {
             inputEl.value = unit ? `${value} ${unit}` : value;
             inputEl.disabled = true;
@@ -774,19 +839,20 @@ let roomColorIndex = 0;
     toolTip.innerText = '';
     setMode('select');
     canvas.renderAll();
+    if (wallAdded && graphAuto) normalizeWalls(false);
     if (wallAdded) saveState('Add wall');
 }
     
     function updateRoomDimensions(roomGroup) {
         const rect = roomGroup._objects.find(o => o.type === 'rect');
-        const widthText = roomGroup._objects.find(o => o.data.type === 'width');
-        const heightText = roomGroup._objects.find(o => o.data.type === 'height');
+        const widthText = roomGroup._objects.find(o => o.data && o.data.type === 'width');
+        const heightText = roomGroup._objects.find(o => o.data && o.data.type === 'height');
 
         const newWidth = rect.getScaledWidth();
         const newHeight = rect.getScaledHeight();
 
-        widthText.set({ text: `${(newWidth / PIXELS_PER_METER).toFixed(2)}m`, left: newWidth / 2, top: newHeight - 16 });
-        heightText.set({ text: `${(newHeight / PIXELS_PER_METER).toFixed(2)}m`, left: 4, top: newHeight / 2 });
+        widthText.set({ text: formatLabel(newWidth / PIXELS_PER_METER), left: newWidth / 2, top: newHeight - 16 });
+        heightText.set({ text: formatLabel(newHeight / PIXELS_PER_METER), left: 4, top: newHeight / 2 });
 
         roomGroup.setCoords();
         canvas.requestRenderAll();
@@ -1059,13 +1125,13 @@ let roomColorIndex = 0;
                     strokeWidth: 2,
                     originX: 'left', originY: 'top'
                 });
-                const widthText = new fabric.Text(`${(width / PIXELS_PER_METER).toFixed(2)}m`, {
+                const widthText = new fabric.Text(formatLabel(width / PIXELS_PER_METER), {
                     fontSize: 12, fill: cssVar('--text-primary'),
                     originX: 'center', originY: 'top',
                     left: width / 2, top: height - 16,
                     data: { type: 'width' }
                 });
-                const heightText = new fabric.Text(`${(height / PIXELS_PER_METER).toFixed(2)}m`, {
+                const heightText = new fabric.Text(formatLabel(height / PIXELS_PER_METER), {
                     fontSize: 12, fill: cssVar('--text-primary'),
                     originX: 'left', originY: 'center',
                     left: 4, top: height / 2,
@@ -1190,7 +1256,7 @@ let roomColorIndex = 0;
         if (!objectSnapCheckbox.checked) return;
         const target = e.target;
         if (target.name === 'temp' || target.type === 'activeSelection') return;
-        const threshold = 8;
+        const threshold = objectSnapThreshold;
         const edges = getObjectSnapEdges(target);
         let bestDx = null, bestDy = null, guideXPos = null, guideYPos = null;
 
@@ -1240,6 +1306,7 @@ let roomColorIndex = 0;
     });
 
     canvas.on('mouse:down', (o) => {
+        if (pinchActive) return;
         if (canvas.isGrabMode) {
             isPanning = true;
             lastPanPoint = getClientPoint(o.e);
@@ -1247,13 +1314,18 @@ let roomColorIndex = 0;
             canvas.setCursor('grabbing');
             return;
         }
-        if (o.target && o.target.selectable && currentMode !== 'select' && currentMode !== 'text' && currentMode !== 'measure' && currentMode !== 'chamfer-active' && currentMode !== 'fillet-active' && currentMode !== 'wall') return;
+        if (o.target && o.target.selectable && currentMode !== 'select' && currentMode !== 'text' && currentMode !== 'measure' && currentMode !== 'chamfer-active' && currentMode !== 'fillet-active' && currentMode !== 'wall' && currentMode !== 'asset' && currentMode !== 'door' && currentMode !== 'window') return;
         if (o.target && currentMode === 'select') return;
 
         const pointer = canvas.getPointer(o.e);
         
         if (isDefiningAngle) {
             finalizeActiveShape();
+            return;
+        }
+
+        if (currentMode === 'node') {
+            startNodeDrag(pointer);
             return;
         }
 
@@ -1331,7 +1403,7 @@ let roomColorIndex = 0;
                 const res = applyFillet(found.wall, found.vertexIndex, filletRadius);
                 if (res.ok) {
                     toolTip.innerText = res.clamped
-                        ? `Corner rounded with a reduced radius of ${res.radius.toFixed(2)} m (the segments are short). Click another corner, or switch tools when done.`
+                        ? `Corner rounded with a reduced radius of ${formatLength(res.radius)} (the segments are short). Click another corner, or switch tools when done.`
                         : 'Corner rounded. Click another corner, or switch tools when done.';
                 } else if (res.error === 'flat') {
                     toolTip.innerText = 'That bend is too gentle to round.';
@@ -1352,11 +1424,11 @@ let roomColorIndex = 0;
                 toolTip.innerText = 'Click the second point.';
             } else {
                 const distPx = Math.hypot(snappedPointer.x - measureFirstPoint.x, snappedPointer.y - measureFirstPoint.y);
-                const distM = (distPx / PIXELS_PER_METER).toFixed(2);
+                const distM = formatLength(distPx / PIXELS_PER_METER);
                 canvas.getObjects().filter(o => o.name === 'temp').forEach(o => canvas.remove(o));
                 canvas.add(new fabric.Line([measureFirstPoint.x, measureFirstPoint.y, snappedPointer.x, snappedPointer.y], { stroke: cssVar('--accent-primary'), strokeWidth: 2, strokeDashArray: [6, 4], selectable: false, evented: false, name: 'temp' }));
                 canvas.renderAll();
-                toolTip.innerText = `Distance: ${distM} m — click to start a new measurement.`;
+                toolTip.innerText = `Distance: ${distM} — click to start a new measurement.`;
                 measureFirstPoint = null;
             }
             return;
@@ -1418,6 +1490,7 @@ let roomColorIndex = 0;
     });
 
     canvas.on('mouse:move', (o) => {
+        if (pinchActive) return;
         const clientPt = getClientPoint(o.e);
         const containerRect = canvasContainer.getBoundingClientRect();
         lastMousePos = { x: clientPt.x - containerRect.left, y: clientPt.y - containerRect.top };
@@ -1436,8 +1509,13 @@ let roomColorIndex = 0;
 
         const pointer = canvas.getPointer(o.e);
         const snappedPointer = { x: snap(pointer.x), y: snap(pointer.y) };
-        coordsDisplay.innerText = `X: ${(pointer.x / PIXELS_PER_METER).toFixed(2)}m, Y: ${(pointer.y / PIXELS_PER_METER).toFixed(2)}m`;
+        coordsDisplay.innerText = `X: ${formatLabel(pointer.x / PIXELS_PER_METER)}, Y: ${formatLabel(pointer.y / PIXELS_PER_METER)}`;
         
+        if (currentMode === 'node' && nodeDrag) {
+            updateNodeDrag(snappedPointer);
+            return;
+        }
+
         if (isDefiningAngle && activeShape) {
             const angle = fabric.util.radiansToDegrees(Math.atan2(snappedPointer.y - activeShape.top, snappedPointer.x - activeShape.left));
             activeShape.set('angle', angle);
@@ -1458,11 +1536,16 @@ let roomColorIndex = 0;
     });
 
     canvas.on('mouse:up', () => {
+        if (pinchActive) return;
         if (canvas.isGrabMode) {
             isPanning = false;
             lastPanPoint = null;
             canvas.defaultCursor = 'grab';
             canvas.setCursor('grab');
+            return;
+        }
+        if (currentMode === 'node') {
+            endNodeDrag();
             return;
         }
         if (currentMode === 'wall') return;
@@ -1637,12 +1720,11 @@ let roomColorIndex = 0;
 
     fileMenuBtn.addEventListener('click', (e) => { e.stopPropagation(); fileMenuDropdown.classList.toggle('show'); });
     window.addEventListener('click', () => { if (fileMenuDropdown.classList.contains('show')) fileMenuDropdown.classList.remove('show'); });
-    function clearCanvas() { if (confirm('Are you sure? All unsaved work will be lost.')) { canvas.clear(); layerList.querySelectorAll('.custom-layer-item').forEach(el => el.remove()); customLayers = []; resetFloors(); historyManager.reset(); canvas.backgroundColor = createGridPattern(); canvas.renderAll(); syncLayerUI(); drawRulers(); saveState('New canvas'); } }
+    function clearCanvas() { if (askConfirm('Are you sure? All unsaved work will be lost.')) { localStorage.removeItem(AUTOSAVE_KEY); canvas.clear(); layerList.querySelectorAll('.custom-layer-item').forEach(el => el.remove()); customLayers = []; resetFloors(); historyManager.reset(); canvas.backgroundColor = createGridPattern(); canvas.renderAll(); syncLayerUI(); drawRulers(); saveState('New canvas'); } }
     newBtn.addEventListener('click', clearCanvas);
-    saveBtn.addEventListener('click', () => saveProject(canvas, getProjectMeta()));
+    saveBtn.addEventListener('click', () => { saveProject(canvas, getProjectMeta()); try { localStorage.removeItem(AUTOSAVE_KEY); } catch (err) { autosaveFailed = false; } });
     loadBtn.addEventListener('click', () => fileInput.click());
-    fileInput.addEventListener('change', (e) => {
-        const file = e.target.files[0]; if (!file) return;
+    function openProjectFile(file) {
         loadProject(canvas, file, (meta) => {
             layerList.querySelectorAll('.custom-layer-item').forEach(el => el.remove());
             customLayers = [];
@@ -1650,8 +1732,13 @@ let roomColorIndex = 0;
                 meta.customLayers.forEach(l => addCustomLayer(l.name, l.id));
             }
             if (meta && Array.isArray(meta.floors) && meta.floors.length) {
-                floors = meta.floors.map(f => ({ id: String(f.id), name: String(f.name || 'Floor'), json: f.json || null, history: null }));
+                floors = meta.floors.map(f => ({ id: String(f.id), name: String(f.name || 'Floor'), json: f.json || null, history: null, graph: f.graph || null, graphPending: !!(f.graph && f.graph.authoritative) }));
                 activeFloorId = floors.some(f => f.id === meta.activeFloorId) ? meta.activeFloorId : floors[0].id;
+                const activeFloor = floors.find(f => f.id === activeFloorId);
+                if (FEATURES.graphPersist && activeFloor && activeFloor.graphPending) {
+                    activeFloor.graphPending = false;
+                    if (applyWallGraph(activeFloor.graph)) toolTip.innerText = 'Walls were rebuilt from the saved wall graph.';
+                }
             } else {
                 floors = [{ id: 'floor-1', name: 'Floor 1', json: null, history: null }];
                 activeFloorId = 'floor-1';
@@ -1659,6 +1746,10 @@ let roomColorIndex = 0;
             renderFloorList();
             canvas.backgroundColor = createGridPattern(); canvas.renderAll(); syncLayerUI(); drawRulers(); fileInput.value = ''; historyManager.reset(); saveState('Open project');
         });
+    }
+    fileInput.addEventListener('change', (e) => {
+        const file = e.target.files[0]; if (!file) return;
+        openProjectFile(file);
     });
     exportBtn.addEventListener('click', () => { modalOverlay.classList.remove('hidden'); modal.classList.remove('hidden'); });
     function closeModal() { modalOverlay.classList.add('hidden'); modal.classList.add('hidden'); }
@@ -1774,9 +1865,7 @@ let roomColorIndex = 0;
         return { left: minX - padding, top: minY - padding, width: (maxX - minX) + padding * 2, height: (maxY - minY) + padding * 2 };
     }
 
-    function getPrintPlan() {
-        const bbox = getContentBoundingBox();
-        if (!bbox) return null;
+    function getPrintMetrics(bbox) {
         const scaleDenominator = parseFloat(document.getElementById('print-scale').value);
         const paperKey = document.getElementById('print-paper').value;
         const orientation = document.querySelector('input[name="print-orientation"]:checked').value;
@@ -1790,6 +1879,66 @@ let roomColorIndex = 0;
         const fits = printedWidthCm <= paper.width && printedHeightCm <= paper.height;
 
         return { bbox, scaleDenominator, paper, orientation, printedWidthCm, printedHeightCm, fits };
+    }
+
+    function getPrintPlan() {
+        const bbox = getContentBoundingBox();
+        if (!bbox) return null;
+        return getPrintMetrics(bbox);
+    }
+
+    function loadFloorStatic(floor) {
+        return new Promise(resolve => {
+            const sc = new fabric.StaticCanvas(null, { width: 100, height: 100, renderOnAddRemove: false, backgroundColor: '#ffffff' });
+            sc.loadFromJSON(floor.json || { objects: [] }, () => resolve(sc));
+        });
+    }
+
+    async function printAllFloors() {
+        captureActiveFloor();
+        const statics = [];
+        for (const floor of floors) statics.push(await loadFloorStatic(floor));
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        statics.forEach(sc => {
+            sc.getObjects().filter(o => o.name !== 'temp' && o.name !== 'snap-guide').forEach(o => {
+                const rect = o.getBoundingRect(true, true);
+                minX = Math.min(minX, rect.left);
+                minY = Math.min(minY, rect.top);
+                maxX = Math.max(maxX, rect.left + rect.width);
+                maxY = Math.max(maxY, rect.top + rect.height);
+            });
+        });
+        if (!isFinite(minX)) { statics.forEach(sc => sc.dispose()); return; }
+        const bbox = { left: minX - GRID_SIZE, top: minY - GRID_SIZE, width: (maxX - minX) + GRID_SIZE * 2, height: (maxY - minY) + GRID_SIZE * 2 };
+        const plan = getPrintMetrics(bbox);
+        const multiplier = (plan.printedWidthCm * (150 / 2.54)) / bbox.width;
+        const urls = statics.map(sc => {
+            forEachDeepObject(sc.getObjects(), obj => {
+                if (obj.stroke) obj.stroke = '#1a1a1a';
+                if ((obj.type === 'i-text' || obj.type === 'text') && obj.fill) obj.fill = '#1a1a1a';
+            });
+            const url = sc.toDataURL({ format: 'png', left: bbox.left, top: bbox.top, width: bbox.width, height: bbox.height, multiplier: multiplier });
+            sc.dispose();
+            return url;
+        });
+        const container = document.getElementById('print-container');
+        container.querySelectorAll('.print-extra').forEach(el => el.remove());
+        const first = document.getElementById('print-image');
+        urls.forEach((url, i) => {
+            const img = i === 0 ? first : document.createElement('img');
+            if (i > 0) { img.className = 'print-extra'; container.appendChild(img); }
+            img.src = url;
+            img.style.width = `${plan.printedWidthCm}cm`;
+            img.style.height = `${plan.printedHeightCm}cm`;
+        });
+        container.classList.add('multi-page');
+        document.body.classList.add('printing-multi');
+        window.addEventListener('afterprint', () => {
+            container.classList.remove('multi-page');
+            document.body.classList.remove('printing-multi');
+            container.querySelectorAll('.print-extra').forEach(el => el.remove());
+        }, { once: true });
+        setTimeout(() => window.print(), 300);
     }
 
     function updatePrintFitHint() {
@@ -1824,6 +1973,11 @@ let roomColorIndex = 0;
     }
 
     document.getElementById('print-apply-btn').addEventListener('click', () => {
+        if (document.getElementById('print-all-floors').checked && floors.length > 1) {
+            closePrintModal();
+            printAllFloors();
+            return;
+        }
         const plan = getPrintPlan();
         if (!plan) { closePrintModal(); return; }
         const PRINT_DPI = 150;
@@ -1945,6 +2099,32 @@ let roomColorIndex = 0;
         return Math.abs(sum / 2);
     }
 
+    function signedArea(points) {
+        let sum = 0;
+        for (let i = 0; i < points.length; i++) {
+            const a = points[i];
+            const b = points[(i + 1) % points.length];
+            sum += a.x * b.y - b.x * a.y;
+        }
+        return sum / 2;
+    }
+
+    function bridgeHole(outer, hole) {
+        const ring = hole.slice();
+        if (Math.sign(signedArea(ring)) === Math.sign(signedArea(outer))) ring.reverse();
+        let bi = 0;
+        let bj = 0;
+        let bd = Infinity;
+        outer.forEach((p, i) => ring.forEach((q, k) => {
+            const d = Math.hypot(p.x - q.x, p.y - q.y);
+            if (d < bd) { bd = d; bi = i; bj = k; }
+        }));
+        const merged = outer.slice(0, bi + 1);
+        for (let k = 0; k <= ring.length; k++) merged.push(ring[(bj + k) % ring.length]);
+        merged.push(outer[bi]);
+        return merged.concat(outer.slice(bi + 1));
+    }
+
     function analyzePlan() {
         const walls = collectWalls();
         const graph = buildGraph(wallRecords(walls), GRAPH_TOL);
@@ -1953,13 +2133,35 @@ let roomColorIndex = 0;
             const info = faceInfo(graph, face);
             let netPoints = offsetPolygonPoints(face.points, -info.thickness / 2);
             if (!netPoints || netPoints.length < 3 || polygonArea(netPoints) < 1) netPoints = face.points;
-            return { netPoints: netPoints, area: polygonArea(netPoints), perimeter: info.perimeter, key: info.key };
+            return { netPoints: netPoints, gross: face.points, nodeIds: new Set(face.nodeIds), grossArea: face.area, area: polygonArea(netPoints), perimeter: info.perimeter, key: info.key, holes: [] };
         });
+        if (FEATURES.roomHoles) {
+            findOuterBoundaries(graph, MIN_ROOM_AREA_PX).forEach(outer => {
+                const info = faceInfo(graph, outer);
+                let host = null;
+                rooms.forEach(room => {
+                    if (outer.nodeIds.some(id => room.nodeIds.has(id))) return;
+                    if (!pointInPolygon(outer.points[0], room.gross)) return;
+                    if (!host || room.grossArea < host.grossArea) host = room;
+                });
+                if (!host) return;
+                const holePoints = offsetPolygonPoints(outer.points, info.thickness / 2) || outer.points;
+                host.holes.push({ points: holePoints, key: info.key });
+            });
+            rooms.forEach(room => {
+                if (!room.holes.length) return;
+                let ring = room.netPoints;
+                room.holes.forEach(hole => { ring = bridgeHole(ring, hole.points); });
+                room.netPoints = ring;
+                room.area = polygonArea(ring);
+                room.key = room.key + '#' + room.holes.map(h => h.key).join('#');
+            });
+        }
         return { walls, graph, stats, rooms };
     }
 
-    function toMeters(px) { return (px / PIXELS_PER_METER).toFixed(2); }
-    function toSquareMeters(px2) { return (px2 / (PIXELS_PER_METER * PIXELS_PER_METER)).toFixed(2); }
+    function toMeters(px) { return formatLength(px / PIXELS_PER_METER); }
+    function toSquareMeters(px2) { return formatArea(px2 / (PIXELS_PER_METER * PIXELS_PER_METER)); }
 
     function graphRow(label, value) {
         const row = document.createElement('div');
@@ -1978,7 +2180,7 @@ let roomColorIndex = 0;
         graphSummary.appendChild(graphRow('Wall objects', String(plan.walls.length)));
         graphSummary.appendChild(graphRow('Wall segments (after splitting)', String(plan.stats.edges)));
         graphSummary.appendChild(graphRow('Corners / junctions / free ends', `${plan.stats.bends} / ${plan.stats.junctions} / ${plan.stats.ends}`));
-        graphSummary.appendChild(graphRow('Total wall length', `${toMeters(plan.stats.totalLength)} m`));
+        graphSummary.appendChild(graphRow('Total wall length', toMeters(plan.stats.totalLength)));
         graphSummary.appendChild(graphRow('Closed rooms found', String(plan.rooms.length)));
         let total = 0;
         if (plan.rooms.length) {
@@ -1988,9 +2190,9 @@ let roomColorIndex = 0;
             graphSummary.appendChild(heading);
             plan.rooms.forEach((room, i) => {
                 total += room.area;
-                graphSummary.appendChild(graphRow(`Room ${i + 1} (perimeter ${toMeters(room.perimeter)} m)`, `${toSquareMeters(room.area)} m²`));
+                graphSummary.appendChild(graphRow(`Room ${i + 1} (perimeter ${toMeters(room.perimeter)})`, toSquareMeters(room.area)));
             });
-            graphSummary.appendChild(graphRow('Total floor area', `${toSquareMeters(total)} m²`));
+            graphSummary.appendChild(graphRow('Total floor area', toSquareMeters(total)));
         }
     }
 
@@ -2034,14 +2236,7 @@ let roomColorIndex = 0;
                 return;
             }
             const color = ROOM_FILL_COLORS[roomColorIndex++ % ROOM_FILL_COLORS.length];
-            const polygon = new fabric.Polygon(pts.map(p => ({ x: p.x - minX, y: p.y - minY })), {
-                left: minX, top: minY,
-                fill: color,
-                stroke: cssVar('--text-primary'),
-                strokeWidth: 2,
-                selectable: true,
-                data: { layer: 'walls', type: 'room', baseColor: color, hatchPattern: 'solid', graphKey: room.key }
-            });
+            const polygon = createRoomPolygon(pts, color, { layer: 'walls', type: 'room', baseColor: color, hatchPattern: 'solid', graphKey: room.key, holes: room.holes.length });
             canvas.add(polygon);
             created++;
         });
@@ -2078,6 +2273,200 @@ let roomColorIndex = 0;
         renderGraphSummary();
     }
 
+
+    function createRoomPolygon(pts, fill, data) {
+        const minX = Math.min(...pts.map(p => p.x));
+        const minY = Math.min(...pts.map(p => p.y));
+        const hasHoles = !!(data && data.holes);
+        return new fabric.Polygon(pts.map(p => ({ x: p.x - minX, y: p.y - minY })), {
+            left: minX, top: minY,
+            fill: fill,
+            stroke: hasHoles ? null : cssVar('--text-primary'),
+            strokeWidth: hasHoles ? 0 : 2,
+            selectable: true,
+            data: data
+        });
+    }
+
+    function refreshAutoRooms() {
+        const plan = analyzePlan();
+        const unmatched = plan.rooms.slice();
+        canvas.getObjects().filter(o => o.data && o.data.type === 'room' && o.data.graphKey && o.type === 'polygon').forEach(old => {
+            const oc = old.getCenterPoint();
+            const oldArea = polygonArea(old.points) * Math.abs(old.scaleX * old.scaleY);
+            let best = null;
+            unmatched.forEach((room, i) => {
+                const xs = room.netPoints.map(p => p.x);
+                const ys = room.netPoints.map(p => p.y);
+                const d = Math.hypot((Math.min(...xs) + Math.max(...xs)) / 2 - oc.x, (Math.min(...ys) + Math.max(...ys)) / 2 - oc.y);
+                const ratio = room.area / oldArea;
+                if (d < 3 * PIXELS_PER_METER && ratio > 0.3 && ratio < 3 && (!best || d < best.d)) best = { room, i, d };
+            });
+            if (!best) return;
+            unmatched.splice(best.i, 1);
+            const fresh = createRoomPolygon(best.room.netPoints, old.fill, Object.assign({}, old.data, { graphKey: best.room.key, holes: best.room.holes.length }));
+            canvas.remove(old);
+            canvas.add(fresh);
+        });
+    }
+
+    let nodeDrag = null;
+
+    function startNodeDrag(pointer) {
+        const walls = collectWalls();
+        const records = wallRecords(walls);
+        const graph = buildGraph(records, GRAPH_TOL);
+        let best = null;
+        graph.nodes.forEach(n => {
+            const d = Math.hypot(n.x - pointer.x, n.y - pointer.y);
+            if (d < 20 && (!best || d < best.d)) best = { node: n, d };
+        });
+        if (!best) { toolTip.innerText = 'No wall corner or junction found nearby.'; return; }
+        const node = { x: best.node.x, y: best.node.y };
+        const items = [];
+        records.forEach((rec, wi) => {
+            const out = [];
+            const indices = [];
+            for (let i = 0; i < rec.points.length; i++) {
+                const a = rec.points[i];
+                out.push({ x: a.x, y: a.y });
+                const aNear = Math.hypot(a.x - node.x, a.y - node.y) <= GRAPH_TOL;
+                if (aNear) indices.push(out.length - 1);
+                if (i < rec.points.length - 1) {
+                    const b = rec.points[i + 1];
+                    const bNear = Math.hypot(b.x - node.x, b.y - node.y) <= GRAPH_TOL;
+                    if (!aNear && !bNear && pointToSegmentDistance(node, a, b) <= GRAPH_TOL) {
+                        out.push({ x: node.x, y: node.y });
+                        indices.push(out.length - 1);
+                    }
+                }
+            }
+            if (indices.length) items.push({ wall: walls[wi], points: out, indices: indices });
+        });
+        nodeDrag = { items: items, last: null, moved: false };
+        toolTip.innerText = 'Drag to move the corner.';
+    }
+
+    function updateNodeDrag(target) {
+        if (nodeDrag.last && nodeDrag.last.x === target.x && nodeDrag.last.y === target.y) return;
+        nodeDrag.last = { x: target.x, y: target.y };
+        nodeDrag.moved = true;
+        nodeDrag.items.forEach(item => {
+            const pts = item.points.map((p, i) => item.indices.indexOf(i) >= 0 ? { x: target.x, y: target.y } : p);
+            const fresh = wallFromAbsPoints(item.wall, pts, { layer: (item.wall.data && item.wall.data.layer) || 'walls', type: 'wall-system' });
+            canvas.remove(item.wall);
+            canvas.add(fresh);
+            item.wall = fresh;
+        });
+        canvas.renderAll();
+    }
+
+    function endNodeDrag() {
+        const drag = nodeDrag;
+        nodeDrag = null;
+        if (!drag || !drag.moved) return;
+        refreshAutoRooms();
+        canvas.discardActiveObject();
+        canvas.renderAll();
+        saveState('Move corner');
+        toolTip.innerText = 'Corner moved. Drag another corner, or switch tools when done.';
+    }
+
+    if (!FEATURES.nodeEdit) {
+        document.getElementById('node-tool-btn').remove();
+    }
+
+
+    const NORMALIZE_TOL = 1.5;
+    let graphAuto = settings.graphAuto;
+    const graphAutoToggle = document.getElementById('graph-auto-toggle');
+    graphAutoToggle.checked = graphAuto;
+    graphAutoToggle.addEventListener('change', () => {
+        graphAuto = graphAutoToggle.checked;
+        updateSetting('graphAuto', graphAuto);
+        if (graphAuto) normalizeWalls(false);
+    });
+
+    function normalizeWalls(announce) {
+        const walls = collectWalls();
+        if (!walls.length) { if (announce) graphMessage.textContent = 'There are no walls to normalize.'; return 0; }
+        const records = wallRecords(walls);
+        const graph = buildGraph(records, NORMALIZE_TOL);
+        const chains = chainsFromGraph(graph, records);
+        const template = walls[0];
+        walls.forEach(w => canvas.remove(w));
+        chains.forEach(chain => {
+            const src = walls[chain.source] || template;
+            const wall = wallFromAbsPoints(src, chain.points, { layer: chain.layer, type: 'wall-system' });
+            wall.set('strokeWidth', chain.thickness);
+            canvas.add(wall);
+        });
+        canvas.discardActiveObject();
+        canvas.renderAll();
+        if (announce) {
+            saveState('Normalize walls');
+            graphMessage.textContent = `Rebuilt ${walls.length} wall object${walls.length > 1 ? 's' : ''} as ${chains.length} graph edge chain${chains.length > 1 ? 's' : ''}: shared corners are exact, overlaps removed and crossings split.`;
+            renderGraphSummary();
+        }
+        return chains.length;
+    }
+
+
+    function serializeWallGraph() {
+        const walls = collectWalls();
+        if (!walls.length) return null;
+        const records = wallRecords(walls);
+        const graph = buildGraph(records, NORMALIZE_TOL);
+        return {
+            version: 1,
+            authoritative: graphAuto,
+            nodes: graph.nodes.map(n => ({ x: n.x, y: n.y })),
+            edges: graph.edges.map(e => ({ a: e.a, b: e.b, t: e.thickness, l: records[e.walls[0]].layer }))
+        };
+    }
+
+    function deserializeWallGraph(data) {
+        if (!data || data.version !== 1 || !Array.isArray(data.nodes) || !Array.isArray(data.edges)) return null;
+        const nodes = data.nodes.map((n, i) => ({ id: i, x: Number(n.x), y: Number(n.y) }));
+        if (nodes.some(n => !isFinite(n.x) || !isFinite(n.y))) return null;
+        const layers = [];
+        const layerIndex = new Map();
+        const edges = [];
+        for (const e of data.edges) {
+            if (!Number.isInteger(e.a) || !Number.isInteger(e.b) || e.a === e.b || e.a < 0 || e.b < 0 || e.a >= nodes.length || e.b >= nodes.length) return null;
+            const thickness = Number(e.t);
+            if (!(thickness > 0)) return null;
+            const layer = typeof e.l === 'string' ? e.l : 'walls';
+            if (!layerIndex.has(layer)) { layerIndex.set(layer, layers.length); layers.push({ layer: layer }); }
+            edges.push({ id: edges.length, a: e.a, b: e.b, len: Math.hypot(nodes[e.a].x - nodes[e.b].x, nodes[e.a].y - nodes[e.b].y), thickness: thickness, walls: [layerIndex.get(layer)] });
+        }
+        const adjacency = nodes.map(() => []);
+        edges.forEach(e => { adjacency[e.a].push(e.id); adjacency[e.b].push(e.id); });
+        return { graph: { nodes, edges, adjacency }, layers };
+    }
+
+    function applyWallGraph(data) {
+        const parsed = deserializeWallGraph(data);
+        if (!parsed) return false;
+        const chains = chainsFromGraph(parsed.graph, parsed.layers);
+        collectWalls().forEach(w => canvas.remove(w));
+        const template = { stroke: cssVar('--text-primary'), strokeWidth: 1 };
+        chains.forEach(chain => {
+            const wall = wallFromAbsPoints(template, chain.points, { layer: chain.layer, type: 'wall-system' });
+            wall.set('strokeWidth', chain.thickness);
+            canvas.add(wall);
+        });
+        canvas.renderAll();
+        return true;
+    }
+
+    document.getElementById('graph-normalize-btn').addEventListener('click', () => normalizeWalls(true));
+    if (!FEATURES.normalizeWalls) {
+        document.getElementById('graph-normalize-btn').remove();
+        document.getElementById('graph-auto-label').remove();
+        graphAuto = false;
+    }
+
     document.getElementById('graph-rooms-btn').addEventListener('click', detectRooms);
     document.getElementById('graph-merge-btn').addEventListener('click', mergeConnectedWalls);
 
@@ -2095,23 +2484,66 @@ let roomColorIndex = 0;
         link.click();
         closeModal();
     });
+    function enlivenFloorObjects(floor) {
+        if (floor.id === activeFloorId) return Promise.resolve(canvas.getObjects());
+        if (!floor.json || !Array.isArray(floor.json.objects)) return Promise.resolve([]);
+        return new Promise(resolve => {
+            fabric.util.enlivenObjects(JSON.parse(JSON.stringify(floor.json.objects)), objs => resolve(objs));
+        });
+    }
+
+    async function exportAllFloorsDxf() {
+        captureActiveFloor();
+        const groups = [];
+        for (let i = 0; i < floors.length; i++) {
+            const safe = String(floors[i].name).replace(/[^A-Za-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '');
+            groups.push({ name: `FLOOR_${i + 1}${safe ? '_' + safe : ''}`, objects: await enlivenFloorObjects(floors[i]) });
+        }
+        const blob = new Blob([exportFloorsToDXF(groups)], { type: 'application/dxf' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'naqshcad-all-floors.dxf';
+        a.click();
+        URL.revokeObjectURL(url);
+    }
+
+    const exportAllDxfBtn = document.getElementById('export-all-dxf-btn');
+    if (FEATURES.allFloorsExport) exportAllDxfBtn.addEventListener('click', exportAllFloorsDxf);
+    else exportAllDxfBtn.remove();
+
     exportDxfBtn.addEventListener('click', () => { const dxfString = exportToDXF(canvas); const blob = new Blob([dxfString], { type: 'application/dxf' }); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = 'gncad-export.dxf'; a.click(); URL.revokeObjectURL(url);});
     importDxfBtn.addEventListener('click', () => dxfFileInput.click());
     dxfFileInput.addEventListener('change', (e) => {
         const file = e.target.files[0]; if (!file) return;
         importDxf(fabric, canvas, cssVar, file, () => saveState('Import DXF'));
     });
-    const themeToggleBtn = document.getElementById('theme-toggle-btn');
-    function syncThemeIcon() {
-        themeToggleBtn.innerHTML = document.body.classList.contains('dark-theme') ? ICON_MOON : ICON_SUN;
+    function sameColor(a, b) {
+        return typeof a === 'string' && typeof b === 'string' && a.trim().toLowerCase() === b.trim().toLowerCase();
     }
-    syncThemeIcon();
-    themeToggleBtn.addEventListener('click', () => {
-        document.body.classList.toggle('light-theme');
-        document.body.classList.toggle('dark-theme');
-        syncThemeIcon();
-        canvas.backgroundColor = createGridPattern(); canvas.renderAll(); drawRulers();
-    });
+
+    function recolorTree(obj, from, to) {
+        if (sameColor(obj.stroke, from)) obj.set('stroke', to);
+        if (sameColor(obj.fill, from)) obj.set('fill', to);
+        if (obj._objects) obj._objects.forEach(child => recolorTree(child, from, to));
+    }
+
+    function applyThemeRecolor(from, to) {
+        canvas.getObjects().forEach(o => recolorTree(o, from, to));
+        const needle = '"' + from + '"';
+        const swap = '"' + to + '"';
+        floors.forEach(f => {
+            if (f.id === activeFloorId) return;
+            if (f.json) f.json = JSON.parse(JSON.stringify(f.json).split(needle).join(swap));
+            if (f.history) {
+                f.history.history.concat(f.history.redoStack).forEach(e => { e.json = e.json.split(needle).join(swap); });
+            }
+        });
+        historyManager.replaceInStates(from, to);
+        rebuildGhost();
+    }
+
+
     const rightPanel = document.getElementById('right-panel');
     const panelToggleBtn = document.getElementById('panel-toggle-btn');
     const panelBackdrop = document.getElementById('panel-backdrop');
@@ -2323,6 +2755,28 @@ let roomColorIndex = 0;
             { id: 'sym-water-heater', name: 'Water Heater', file: 'sym_water_heater.png', sizeMeters: 0.2 },
             { id: 'sym-washer-hookup', name: 'Washer Hookup', file: 'sym_washer_hookup.png', sizeMeters: 0.15 },
             { id: 'sym-gas-line', name: 'Gas Line', file: 'sym_gas_line.png', sizeMeters: 0.15 },
+        ],
+        'MEP Symbols': [
+            { id: 'sym-data-outlet', name: 'Data Outlet', file: 'sym-data-outlet.svg', sizeMeters: 0.15 },
+            { id: 'sym-tv-point', name: 'TV Point', file: 'sym-tv-point.svg', sizeMeters: 0.15 },
+            { id: 'sym-thermostat', name: 'Thermostat', file: 'sym-thermostat.svg', sizeMeters: 0.15 },
+            { id: 'sym-dist-board', name: 'Distribution Board', file: 'sym-dist-board.svg', sizeMeters: 0.3 },
+            { id: 'sym-wall-light', name: 'Wall Light', file: 'sym-wall-light.svg', sizeMeters: 0.15 },
+            { id: 'sym-switch-3way', name: '3-Way Switch', file: 'sym-switch-3way.svg', sizeMeters: 0.15 },
+            { id: 'sym-dimmer', name: 'Dimmer', file: 'sym-dimmer.svg', sizeMeters: 0.15 },
+            { id: 'sym-doorbell', name: 'Doorbell', file: 'sym-doorbell.svg', sizeMeters: 0.12 },
+            { id: 'sym-exit-sign', name: 'Exit Sign', file: 'sym-exit-sign.svg', sizeMeters: 0.3 },
+            { id: 'sym-sprinkler', name: 'Sprinkler', file: 'sym-sprinkler.svg', sizeMeters: 0.15 },
+            { id: 'sym-cctv', name: 'CCTV Camera', file: 'sym-cctv.svg', sizeMeters: 0.2 },
+            { id: 'sym-radiator', name: 'Radiator', file: 'sym-radiator.svg', sizeMeters: 0.9 },
+            { id: 'sym-ac-split', name: 'AC Split Unit', file: 'sym-ac-split.svg', sizeMeters: 0.9 },
+            { id: 'sym-boiler', name: 'Boiler', file: 'sym-boiler.svg', sizeMeters: 0.5 },
+            { id: 'sym-valve', name: 'Shutoff Valve', file: 'sym-valve.svg', sizeMeters: 0.12 },
+            { id: 'sym-water-meter', name: 'Water Meter', file: 'sym-water-meter.svg', sizeMeters: 0.2 },
+            { id: 'sym-hose-bib', name: 'Hose Bib', file: 'sym-hose-bib.svg', sizeMeters: 0.12 },
+            { id: 'sym-sump-pump', name: 'Sump Pump', file: 'sym-sump-pump.svg', sizeMeters: 0.3 },
+            { id: 'sym-fire-ext', name: 'Fire Extinguisher', file: 'sym-fire-ext.svg', sizeMeters: 0.15 },
+            { id: 'sym-floor-drain', name: 'Floor Drain', file: 'sym-floor-drain.svg', sizeMeters: 0.2 },
         ],
         'Outdoor': [
             { id: 'plant', name: 'Plant', file: 'plant.svg', sizeMeters: 0.4 },
@@ -2671,6 +3125,8 @@ let roomColorIndex = 0;
         const crosshairModes = ['wall', 'rect', 'stairs', 'dimension', 'door', 'window', 'measure', 'text'];
         canvas.defaultCursor = crosshairModes.includes(mode) ? 'crosshair' : 'default';
         canvas.selection = mode === 'select';
+        canvas.skipTargetFind = mode === 'node';
+        nodeDrag = null;
         canvas.discardActiveObject();
         canvas.renderAll();
         updatePropertiesPanel(null);
@@ -2685,6 +3141,7 @@ let roomColorIndex = 0;
             case 'dimension': toolTip.innerText = 'Click two points to measure.'; break;
             case 'measure': toolTip.innerText = 'Click two points for a quick distance readout.'; break;
             case 'text': toolTip.innerText = 'Click on the canvas to add a text label.'; break;
+            case 'node': toolTip.innerText = 'Drag a wall corner or junction. Connected walls and detected rooms follow.'; break;
             case 'trim': toolTip.innerText = 'Click near the end of a wall to trim/extend it to the nearest wall.'; break;
             case 'asset': toolTip.innerText = 'Select a furniture item, then click on the canvas.'; break;
         }
@@ -2697,6 +3154,778 @@ let roomColorIndex = 0;
     }
     toolButtons.forEach(btn => { btn.addEventListener('click', () => setMode(btn.id.replace('-tool-btn', ''))); });
 
+
+    let objectSnapThreshold = settings.objectSnapThreshold;
+    const AUTOSAVE_KEY = 'naqshcad-autosave';
+    let autosaveTimer = null;
+    let autosaveFailed = false;
+    let lastAutosave = '';
+    const settingsModalOverlay = document.getElementById('settings-modal-overlay');
+    const settingsModal = document.getElementById('settings-modal');
+    const settingsBody = document.getElementById('settings-body');
+    const settingsFileInput = document.getElementById('settings-file-input');
+    const systemDarkQuery = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+
+    function askConfirm(message) {
+        return settings.confirmDestructive ? confirm(message) : true;
+    }
+
+    function updateSetting(key, value) {
+        settings[key] = value;
+        saveSettings(settings);
+        if (!settingsModal.classList.contains('hidden')) renderSettings();
+    }
+
+    function resolveDarkTheme() {
+        if (settings.theme === 'system') return !!(systemDarkQuery && systemDarkQuery.matches);
+        return settings.theme !== 'light';
+    }
+
+    function applyTheme() {
+        const wantDark = resolveDarkTheme();
+        if (wantDark === document.body.classList.contains('dark-theme')) return;
+        const oldColor = cssVar('--text-primary');
+        document.body.classList.toggle('dark-theme', wantDark);
+        document.body.classList.toggle('light-theme', !wantDark);
+        const newColor = cssVar('--text-primary');
+        if (FEATURES.liveRecolor && !sameColor(oldColor, newColor)) applyThemeRecolor(oldColor, newColor);
+        canvas.backgroundColor = createGridPattern();
+        canvas.renderAll();
+        drawRulers();
+    }
+
+    if (systemDarkQuery && systemDarkQuery.addEventListener) {
+        systemDarkQuery.addEventListener('change', () => { if (settings.theme === 'system') applyTheme(); });
+    }
+
+    function writeAutosave() {
+        if (!canvas.getObjects().length && floors.length === 1) return;
+        try {
+            const meta = getProjectMeta();
+            const payload = { canvasData: canvas.toJSON(['data', 'name']), meta: meta };
+            const serialized = JSON.stringify(payload);
+            if (serialized === lastAutosave) return;
+            localStorage.setItem(AUTOSAVE_KEY, JSON.stringify({ time: Date.now(), dirty: true, payload: payload }));
+            lastAutosave = serialized;
+            autosaveFailed = false;
+        } catch (err) {
+            if (!autosaveFailed) toolTip.innerText = 'Autosave failed: browser storage is full or unavailable.';
+            autosaveFailed = true;
+        }
+    }
+
+    function startAutosave(minutes) {
+        if (autosaveTimer) clearInterval(autosaveTimer);
+        autosaveTimer = null;
+        if (minutes > 0) autosaveTimer = setInterval(writeAutosave, minutes * 60000);
+    }
+
+    document.addEventListener('visibilitychange', () => {
+        if (document.hidden && settings.autosave > 0) writeAutosave();
+    });
+
+    function readAutosave() {
+        try {
+            const entry = JSON.parse(localStorage.getItem(AUTOSAVE_KEY) || 'null');
+            return entry && entry.payload ? entry : null;
+        } catch (err) {
+            return null;
+        }
+    }
+
+    function restoreAutosave() {
+        const entry = readAutosave();
+        if (!entry) { alert('There is no autosave in this browser.'); return false; }
+        openProjectFile(new File([JSON.stringify(entry.payload)], 'autosave.gncad', { type: 'application/json' }));
+        return true;
+    }
+
+    function offerAutosaveRestore() {
+        const entry = readAutosave();
+        if (!entry || !entry.dirty) return;
+        const when = new Date(entry.time).toLocaleString();
+        if (confirm(`An autosaved project from ${when} was found. Restore it?`)) {
+            restoreAutosave();
+        } else {
+            entry.dirty = false;
+            try { localStorage.setItem(AUTOSAVE_KEY, JSON.stringify(entry)); } catch (err) { autosaveFailed = true; }
+        }
+    }
+
+    const settingApplyHandlers = {
+        theme: () => applyTheme(),
+        accent: (v) => {
+            if (v === 'default') document.body.style.removeProperty('--accent-primary');
+            else document.body.style.setProperty('--accent-primary', v);
+            drawRulers();
+        },
+        language: () => setLanguage(settings.language, settings.persianDigits),
+        persianDigits: () => setLanguage(settings.language, settings.persianDigits),
+        reduceMotion: (v) => document.body.classList.toggle('reduce-motion', !!v),
+        largeTargets: (v) => document.body.classList.toggle('large-targets', !!v),
+        showHints: (v) => document.body.classList.toggle('no-hints', !v),
+        showGrid: () => { canvas.backgroundColor = createGridPattern(); canvas.requestRenderAll(); },
+        showRulers: (v) => { showRulersCheckbox.checked = !!v; drawRulers(); drawCrosshairs(lastMousePos); },
+        snapGrid: (v) => { snapCheckbox.checked = !!v; },
+        objectSnap: (v) => { objectSnapCheckbox.checked = !!v; },
+        objectSnapThreshold: (v) => { objectSnapThreshold = v; },
+        wallThickness: (v) => {
+            currentStrokeWidth = Number(v);
+            wallThicknessSelector.querySelectorAll('.thickness-option').forEach(el => el.classList.toggle('active', parseInt(el.dataset.thickness, 10) === Number(v)));
+        },
+        filletRadius: (v) => { filletRadius = v; document.getElementById('fillet-radius').value = v; },
+        chamferDistance: (v) => { chamferDistance = v; document.getElementById('chamfer-distance').value = v; },
+        graphAuto: (v, fromUser) => {
+            graphAuto = !!v && FEATURES.normalizeWalls;
+            graphAutoToggle.checked = graphAuto;
+            if (fromUser && graphAuto && collectWalls().length) normalizeWalls(true);
+        },
+        showFloorBelow: (v) => { showGhost = !!v; ghostToggle.checked = showGhost; rebuildGhost(); },
+        autosave: (v) => startAutosave(Number(v)),
+        historyLimit: (v) => historyManager.setLimit(Number(v)),
+        confirmDestructive: () => {},
+        units: (v) => {
+            setUnitSystem(v);
+            canvas.getObjects().filter(o => o.data && o.data.type === 'room' && o._objects && o._objects.some(c => c.data && c.data.type === 'width')).forEach(g => updateRoomDimensions(g));
+            updatePropertiesPanel(canvas.getActiveObject());
+            canvas.requestRenderAll();
+        }
+    };
+
+    function applySetting(key, fromUser) {
+        const handler = settingApplyHandlers[key];
+        if (handler) handler(settings[key], fromUser);
+    }
+
+    function applyAllSettings() {
+        Object.keys(DEFAULT_SETTINGS).forEach(key => applySetting(key, false));
+    }
+
+    function findSchemaItem(key) {
+        for (const section of SETTINGS_SCHEMA) {
+            const item = section.items.find(i => i.key === key);
+            if (item) return item;
+        }
+        return null;
+    }
+
+    function renderSettings() {
+        const scroll = settingsBody.scrollTop;
+        settingsBody.innerHTML = '';
+        SETTINGS_SCHEMA.forEach(section => {
+            const wrap = document.createElement('div');
+            wrap.className = 'settings-section';
+            const heading = document.createElement('h4');
+            heading.textContent = section.title;
+            wrap.appendChild(heading);
+            section.items.forEach(item => {
+                const row = document.createElement('div');
+                row.className = 'setting-row' + (item.type === 'action' ? ' setting-action' : '');
+                if (item.type === 'action') {
+                    const btn = document.createElement('button');
+                    btn.className = 'panel-action-btn';
+                    btn.textContent = item.label;
+                    btn.dataset.action = item.action;
+                    row.appendChild(btn);
+                    wrap.appendChild(row);
+                    return;
+                }
+                const label = document.createElement('span');
+                label.className = 'setting-label';
+                label.textContent = item.label;
+                let control;
+                if (item.type === 'toggle') {
+                    control = document.createElement('label');
+                    control.className = 'switch';
+                    const input = document.createElement('input');
+                    input.type = 'checkbox';
+                    input.checked = !!settings[item.key];
+                    input.dataset.key = item.key;
+                    const slider = document.createElement('span');
+                    slider.className = 'slider';
+                    control.append(input, slider);
+                } else if (item.type === 'select') {
+                    control = document.createElement('select');
+                    control.dataset.key = item.key;
+                    item.options.forEach(([value, text]) => {
+                        const option = document.createElement('option');
+                        option.value = String(value);
+                        option.textContent = text;
+                        if (String(settings[item.key]) === String(value)) option.selected = true;
+                        control.appendChild(option);
+                    });
+                } else {
+                    control = document.createElement('input');
+                    control.type = 'number';
+                    control.min = item.min;
+                    control.max = item.max;
+                    control.step = item.step;
+                    control.value = settings[item.key];
+                    control.dataset.key = item.key;
+                }
+                row.append(label, control);
+                if (item.hint) {
+                    const hint = document.createElement('div');
+                    hint.className = 'setting-hint';
+                    hint.textContent = item.hint;
+                    row.appendChild(hint);
+                }
+                wrap.appendChild(row);
+            });
+            settingsBody.appendChild(wrap);
+        });
+        settingsBody.scrollTop = scroll;
+    }
+
+    function openSettings() {
+        renderSettings();
+        settingsModalOverlay.classList.remove('hidden');
+        settingsModal.classList.remove('hidden');
+    }
+
+    function closeSettings() {
+        settingsModalOverlay.classList.add('hidden');
+        settingsModal.classList.add('hidden');
+    }
+
+    document.getElementById('settings-btn').addEventListener('click', openSettings);
+    document.getElementById('close-settings-modal-btn').addEventListener('click', closeSettings);
+    settingsModalOverlay.addEventListener('click', closeSettings);
+
+    settingsBody.addEventListener('change', (e) => {
+        const key = e.target.dataset.key;
+        if (!key) return;
+        const item = findSchemaItem(key);
+        if (!item) return;
+        let value;
+        if (item.type === 'toggle') value = e.target.checked;
+        else if (item.type === 'select') value = item.options.find(o => String(o[0]) === e.target.value)[0];
+        else {
+            value = parseFloat(e.target.value);
+            if (!isFinite(value)) value = DEFAULT_SETTINGS[key];
+            value = Math.min(item.max, Math.max(item.min, value));
+        }
+        settings[key] = value;
+        saveSettings(settings);
+        applySetting(key, true);
+        if (item.type === 'number') e.target.value = value;
+    });
+
+    function replaceSettings(next) {
+        settings = next;
+        saveSettings(settings);
+        applyAllSettings();
+        renderSettings();
+    }
+
+    settingsBody.addEventListener('click', (e) => {
+        const btn = e.target.closest('[data-action]');
+        if (!btn) return;
+        const action = btn.dataset.action;
+        if (action === 'restoreAutosave') {
+            if (!readAutosave()) { alert('There is no autosave in this browser.'); return; }
+            if (askConfirm('Replace the current project with the autosave?')) { closeSettings(); restoreAutosave(); }
+        } else if (action === 'clearAutosave') {
+            try { localStorage.removeItem(AUTOSAVE_KEY); } catch (err) { autosaveFailed = true; }
+            lastAutosave = '';
+            toolTip.innerText = 'Autosave deleted.';
+        } else if (action === 'exportSettings') {
+            const blob = new Blob([JSON.stringify(settings, null, 2)], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'naqshcad-settings.json';
+            a.click();
+            URL.revokeObjectURL(url);
+        } else if (action === 'importSettings') {
+            settingsFileInput.click();
+        } else if (action === 'resetSettings') {
+            if (askConfirm('Reset all settings to their defaults?')) replaceSettings(sanitizeSettings({}));
+        }
+    });
+
+    settingsFileInput.addEventListener('change', () => {
+        const file = settingsFileInput.files[0];
+        settingsFileInput.value = '';
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = (event) => {
+            try {
+                replaceSettings(sanitizeSettings(JSON.parse(String(event.target.result))));
+            } catch (err) {
+                alert('This file is not a valid settings export.');
+            }
+        };
+        reader.readAsText(file);
+    });
+
+    snapCheckbox.addEventListener('change', () => updateSetting('snapGrid', snapCheckbox.checked));
+    objectSnapCheckbox.addEventListener('change', () => updateSetting('objectSnap', objectSnapCheckbox.checked));
+    showRulersCheckbox.addEventListener('change', () => updateSetting('showRulers', showRulersCheckbox.checked));
+    wallThicknessSelector.addEventListener('click', (e) => { if (e.target.classList.contains('thickness-option')) updateSetting('wallThickness', currentStrokeWidth); });
+    document.getElementById('fillet-apply-btn').addEventListener('click', () => updateSetting('filletRadius', filletRadius));
+    document.getElementById('chamfer-apply-btn').addEventListener('click', () => updateSetting('chamferDistance', chamferDistance));
+
+
+    let pinchActive = false;
+    let pinchState = null;
+    const touchSurface = canvas.upperCanvasEl;
+
+    function touchCenter(touches) {
+        return { x: (touches[0].clientX + touches[1].clientX) / 2, y: (touches[0].clientY + touches[1].clientY) / 2 };
+    }
+
+    function touchDistance(touches) {
+        return Math.hypot(touches[0].clientX - touches[1].clientX, touches[0].clientY - touches[1].clientY);
+    }
+
+    touchSurface.addEventListener('touchstart', (e) => {
+        if (e.touches.length !== 2) return;
+        pinchActive = true;
+        if (isDrawing && activeShape) {
+            canvas.remove(activeShape);
+            activeShape = null;
+            isDrawing = false;
+            canvas.renderAll();
+        }
+        const rect = touchSurface.getBoundingClientRect();
+        const c = touchCenter(e.touches);
+        pinchState = { distance: touchDistance(e.touches), zoom: canvas.getZoom(), x: c.x - rect.left, y: c.y - rect.top };
+        e.preventDefault();
+    }, { passive: false });
+
+    touchSurface.addEventListener('touchmove', (e) => {
+        if (!pinchActive || !pinchState || e.touches.length !== 2) return;
+        e.preventDefault();
+        const rect = touchSurface.getBoundingClientRect();
+        const c = touchCenter(e.touches);
+        const x = c.x - rect.left;
+        const y = c.y - rect.top;
+        let zoom = pinchState.zoom * touchDistance(e.touches) / pinchState.distance;
+        zoom = Math.min(10, Math.max(0.1, zoom));
+        canvas.relativePan({ x: x - pinchState.x, y: y - pinchState.y });
+        canvas.zoomToPoint({ x: x, y: y }, zoom);
+        pinchState.x = x;
+        pinchState.y = y;
+        zoomDisplay.innerText = `Zoom: ${Math.round(zoom * 100)}%`;
+        drawRulers();
+    }, { passive: false });
+
+    function endPinch(e) {
+        if (!pinchActive) return;
+        pinchState = null;
+        if (e.touches.length === 0) setTimeout(() => { pinchActive = false; }, 80);
+    }
+    touchSurface.addEventListener('touchend', endPinch);
+    touchSurface.addEventListener('touchcancel', endPinch);
+
+    function downloadBlob(blob, name) {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = name;
+        a.click();
+        URL.revokeObjectURL(url);
+    }
+
+    function staticBounds(sc) {
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        sc.getObjects().filter(o => o.name !== 'temp' && o.name !== 'snap-guide').forEach(o => {
+            const rect = o.getBoundingRect(true, true);
+            minX = Math.min(minX, rect.left);
+            minY = Math.min(minY, rect.top);
+            maxX = Math.max(maxX, rect.left + rect.width);
+            maxY = Math.max(maxY, rect.top + rect.height);
+        });
+        if (!isFinite(minX)) return null;
+        return { left: minX - GRID_SIZE, top: minY - GRID_SIZE, width: (maxX - minX) + GRID_SIZE * 2, height: (maxY - minY) + GRID_SIZE * 2 };
+    }
+
+    function inkStaticCanvas(sc) {
+        forEachDeepObject(sc.getObjects(), obj => {
+            if (obj.stroke) obj.stroke = '#1a1a1a';
+            if ((obj.type === 'i-text' || obj.type === 'text') && obj.fill) obj.fill = '#1a1a1a';
+        });
+    }
+
+    async function exportActiveFloorImage(kind) {
+        captureActiveFloor();
+        const floor = floors.find(f => f.id === activeFloorId);
+        const sc = await loadFloorStatic(floor);
+        const bbox = staticBounds(sc);
+        if (!bbox) { sc.dispose(); alert('There is nothing to export on this floor.'); return; }
+        inkStaticCanvas(sc);
+        const safe = String(floor.name).replace(/[^A-Za-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '') || 'floor';
+        if (kind === 'svg') {
+            const svg = sc.toSVG({ viewBox: { x: bbox.left, y: bbox.top, width: bbox.width, height: bbox.height }, width: `${bbox.width}px`, height: `${bbox.height}px` });
+            downloadBlob(new Blob([svg], { type: 'image/svg+xml' }), `naqshcad-${safe}.svg`);
+        } else {
+            const multiplier = Math.min(4, Math.max(1, 2400 / bbox.width));
+            const url = sc.toDataURL({ format: 'png', left: bbox.left, top: bbox.top, width: bbox.width, height: bbox.height, multiplier: multiplier });
+            downloadBlob(new Blob([dataUrlToBytes(url)], { type: 'image/png' }), `naqshcad-${safe}.png`);
+        }
+        sc.dispose();
+    }
+
+    async function exportPdfAllFloors() {
+        captureActiveFloor();
+        const statics = [];
+        for (const floor of floors) statics.push(await loadFloorStatic(floor));
+        let box = null;
+        statics.forEach(sc => {
+            const b = staticBounds(sc);
+            if (!b) return;
+            if (!box) { box = { left: b.left, top: b.top, right: b.left + b.width, bottom: b.top + b.height }; return; }
+            box = { left: Math.min(box.left, b.left), top: Math.min(box.top, b.top), right: Math.max(box.right, b.left + b.width), bottom: Math.max(box.bottom, b.top + b.height) };
+        });
+        if (!box) { statics.forEach(sc => sc.dispose()); alert('There is nothing to export.'); return; }
+        const width = box.right - box.left;
+        const height = box.bottom - box.top;
+        const multiplier = Math.min(4, Math.max(1, 2000 / width));
+        const pages = statics.map(sc => {
+            inkStaticCanvas(sc);
+            const url = sc.toDataURL({ format: 'jpeg', quality: 0.92, left: box.left, top: box.top, width: width, height: height, multiplier: multiplier });
+            sc.dispose();
+            return { jpeg: dataUrlToBytes(url), width: Math.round(width * multiplier), height: Math.round(height * multiplier) };
+        });
+        downloadBlob(buildPdf(pages), 'naqshcad-plan.pdf');
+    }
+
+    document.getElementById('export-png-btn').addEventListener('click', () => exportActiveFloorImage('png'));
+    document.getElementById('export-svg-btn').addEventListener('click', () => exportActiveFloorImage('svg'));
+    document.getElementById('export-pdf-btn').addEventListener('click', exportPdfAllFloors);
+
+
+    const reportModal = document.getElementById('report-modal');
+    const reportOverlay = document.getElementById('report-modal-overlay');
+    const reportBody = document.getElementById('report-body');
+    let reportEntries = [];
+    let flashPoint = null;
+
+    async function collectScheduleEntries() {
+        captureActiveFloor();
+        const entries = [];
+        for (const floor of floors) {
+            const objs = await enlivenFloorObjects(floor);
+            entries.push({ floor: floor.name, schedule: buildSchedule(objs, PIXELS_PER_METER, getWallAbsPoints) });
+        }
+        return entries;
+    }
+
+    function roomSpotTaken(room, existing) {
+        const xs = room.netPoints.map(p => p.x);
+        const ys = room.netPoints.map(p => p.y);
+        const cx = (Math.min(...xs) + Math.max(...xs)) / 2;
+        const cy = (Math.min(...ys) + Math.max(...ys)) / 2;
+        return existing.some(o => {
+            const c = o.getCenterPoint();
+            const area = o.type === 'polygon' ? polygonArea(o.points) * Math.abs(o.scaleX * o.scaleY) : o.getScaledWidth() * o.getScaledHeight();
+            return Math.hypot(c.x - cx, c.y - cy) < 0.3 * PIXELS_PER_METER && Math.abs(area - room.area) / room.area < 0.25;
+        });
+    }
+
+    function currentPlanChecks() {
+        const plan = analyzePlan();
+        const openings = canvas.getObjects().filter(o => o.data && (o.data.type === 'door' || o.data.type === 'window')).map(o => {
+            const c = o.getCenterPoint();
+            return { type: o.data.type, x: c.x, y: c.y };
+        });
+        const existing = canvas.getObjects().filter(o => o.data && o.data.type === 'room');
+        const unmatched = plan.rooms.filter(room => !roomSpotTaken(room, existing)).map(room => {
+            const xs = room.netPoints.map(p => p.x);
+            const ys = room.netPoints.map(p => p.y);
+            return { x: (Math.min(...xs) + Math.max(...xs)) / 2, y: (Math.min(...ys) + Math.max(...ys)) / 2 };
+        });
+        return runChecks({ graph: plan.graph, openings: openings, unmatchedLoops: unmatched, ppm: PIXELS_PER_METER, describeLength: m => formatLength(m) });
+    }
+
+    function focusPoint(at) {
+        const z = canvas.getZoom();
+        canvas.setViewportTransform([z, 0, 0, z, canvas.getWidth() / 2 - at.x * z, canvas.getHeight() / 2 - at.y * z]);
+        flashPoint = { x: at.x, y: at.y, until: Date.now() + 2500 };
+        drawRulers();
+        canvas.requestRenderAll();
+    }
+
+    canvas.on('after:render', (opt) => {
+        if (!flashPoint) return;
+        const left = flashPoint.until - Date.now();
+        if (left <= 0) { flashPoint = null; return; }
+        const ctx = canvas.getContext();
+        if (opt && opt.ctx && opt.ctx !== ctx) return;
+        const v = canvas.viewportTransform;
+        const pulse = 14 + 6 * Math.sin(Date.now() / 120);
+        ctx.save();
+        ctx.transform(v[0], v[1], v[2], v[3], v[4], v[5]);
+        ctx.beginPath();
+        ctx.arc(flashPoint.x, flashPoint.y, pulse / canvas.getZoom(), 0, Math.PI * 2);
+        ctx.lineWidth = 3 / canvas.getZoom();
+        ctx.strokeStyle = cssVar('--accent-primary');
+        ctx.stroke();
+        ctx.restore();
+        setTimeout(() => canvas.requestRenderAll(), 50);
+    });
+
+    async function renderReport() {
+        reportBody.innerHTML = '';
+        reportBody.appendChild(graphRow('Working...', ''));
+        reportEntries = await collectScheduleEntries();
+        reportBody.innerHTML = '';
+        const sqm = v => formatArea(v);
+        reportEntries.forEach(({ floor, schedule }) => {
+            const title = document.createElement('div');
+            title.className = 'report-floor';
+            title.textContent = floor;
+            reportBody.appendChild(title);
+            const t = scheduleTotals(schedule);
+            if (!t.rooms && !schedule.walls.count && !t.doors && !t.windows && !t.stairs && !t.furniture) {
+                reportBody.appendChild(graphRow('Nothing drawn on this floor', ''));
+                return;
+            }
+            schedule.rooms.forEach(r => reportBody.appendChild(graphRow(`${r.name} (perimeter ${formatLength(r.perimeter)})`, sqm(r.area))));
+            if (t.rooms) reportBody.appendChild(graphRow('Total room area', sqm(t.roomArea)));
+            Object.entries(schedule.walls.byWeight).forEach(([label, length]) => reportBody.appendChild(graphRow(label, formatLength(length))));
+            Object.entries(schedule.doors).forEach(([width, n]) => reportBody.appendChild(graphRow(`Doors, ${formatLength(parseFloat(width))} wide`, String(n))));
+            Object.entries(schedule.windows).forEach(([width, n]) => reportBody.appendChild(graphRow(`Windows, ${formatLength(parseFloat(width))} wide`, String(n))));
+            if (schedule.stairs) reportBody.appendChild(graphRow('Stairs', String(schedule.stairs)));
+            Object.entries(schedule.furniture).forEach(([name, n]) => reportBody.appendChild(graphRow(name, String(n))));
+        });
+        const checksTitle = document.createElement('div');
+        checksTitle.className = 'report-floor';
+        checksTitle.textContent = 'Plan checks (current floor)';
+        reportBody.appendChild(checksTitle);
+        currentPlanChecks().forEach(issue => {
+            const row = document.createElement('div');
+            row.className = 'report-issue';
+            const badge = document.createElement('span');
+            badge.className = 'badge ' + issue.severity;
+            badge.textContent = issue.severity === 'warning' ? '!' : (issue.severity === 'ok' ? '✓' : 'i');
+            const text = document.createElement('span');
+            text.textContent = issue.message;
+            row.append(badge, text);
+            if (issue.at) {
+                const show = document.createElement('button');
+                show.textContent = 'Show';
+                show.addEventListener('click', () => { closeReport(); focusPoint(issue.at); });
+                row.appendChild(show);
+            }
+            reportBody.appendChild(row);
+        });
+    }
+
+    function openReport() {
+        reportOverlay.classList.remove('hidden');
+        reportModal.classList.remove('hidden');
+        renderReport();
+    }
+
+    function closeReport() {
+        reportOverlay.classList.add('hidden');
+        reportModal.classList.add('hidden');
+    }
+
+    document.getElementById('report-btn').addEventListener('click', (e) => { e.preventDefault(); openReport(); });
+    document.getElementById('close-report-modal-btn').addEventListener('click', closeReport);
+    reportOverlay.addEventListener('click', closeReport);
+    document.getElementById('report-refresh-btn').addEventListener('click', renderReport);
+    document.getElementById('report-csv-btn').addEventListener('click', () => {
+        if (!reportEntries.length) return;
+        downloadBlob(new Blob(['\ufeff' + scheduleToCsv(reportEntries)], { type: 'text/csv;charset=utf-8' }), 'naqshcad-schedule.csv');
+    });
+
+    const compareModal = document.getElementById('compare-modal');
+    const compareOverlay = document.getElementById('compare-modal-overlay');
+    const compareBody = document.getElementById('compare-body');
+    const compareInput = document.getElementById('compare-file-input');
+
+    function enlivenJson(json) {
+        if (!json || !Array.isArray(json.objects)) return Promise.resolve([]);
+        return new Promise(resolve => fabric.util.enlivenObjects(JSON.parse(JSON.stringify(json.objects)), objs => resolve(objs)));
+    }
+
+    function sumTotals(list) {
+        const out = { rooms: 0, roomArea: 0, wallLength: 0, doors: 0, windows: 0, stairs: 0, furniture: 0 };
+        list.forEach(s => { const t = scheduleTotals(s); Object.keys(out).forEach(k => { out[k] += t[k]; }); });
+        return out;
+    }
+
+    async function totalsFromPayload(payload) {
+        const sources = [];
+        if (payload.meta && Array.isArray(payload.meta.floors) && payload.meta.floors.length) {
+            payload.meta.floors.forEach(f => sources.push(f.json || (f.id === payload.meta.activeFloorId ? payload.canvasData : null)));
+        } else {
+            sources.push(payload.canvasData);
+        }
+        const schedules = [];
+        for (const json of sources) schedules.push(buildSchedule(await enlivenJson(json), PIXELS_PER_METER, getWallAbsPoints));
+        return { totals: sumTotals(schedules), floors: sources.length };
+    }
+
+    function compareRow(label, a, b, delta, head) {
+        const row = document.createElement('div');
+        row.className = 'compare-row' + (head ? ' head' : '');
+        [label, a, b, delta].forEach(text => { const cell = document.createElement('span'); cell.textContent = text; row.appendChild(cell); });
+        return row;
+    }
+
+    async function runCompare(file) {
+        compareOverlay.classList.remove('hidden');
+        compareModal.classList.remove('hidden');
+        compareBody.innerHTML = '';
+        compareBody.appendChild(graphRow('Comparing...', ''));
+        try {
+            const other = await totalsFromPayload(JSON.parse(await file.text()));
+            const entries = await collectScheduleEntries();
+            const mine = { totals: sumTotals(entries.map(e => e.schedule)), floors: entries.length };
+            compareBody.innerHTML = '';
+            compareBody.appendChild(compareRow('', 'Current', file.name.slice(0, 18), 'Change', true));
+            const count = (label, key) => {
+                const d = other.totals[key] - mine.totals[key];
+                compareBody.appendChild(compareRow(label, String(mine.totals[key]), String(other.totals[key]), (d > 0 ? '+' : '') + d));
+            };
+            const metric = (label, key, fmt) => {
+                const d = other.totals[key] - mine.totals[key];
+                compareBody.appendChild(compareRow(label, fmt(mine.totals[key]), fmt(other.totals[key]), (d > 0 ? '+' : '') + fmt(d)));
+            };
+            const floorsDelta = other.floors - mine.floors;
+            compareBody.appendChild(compareRow('Floors', String(mine.floors), String(other.floors), (floorsDelta > 0 ? '+' : '') + floorsDelta));
+            count('Rooms', 'rooms');
+            metric('Room area', 'roomArea', v => formatArea(v));
+            metric('Wall length', 'wallLength', v => formatLength(v));
+            count('Doors', 'doors');
+            count('Windows', 'windows');
+            count('Stairs', 'stairs');
+            count('Furniture items', 'furniture');
+        } catch (err) {
+            compareBody.innerHTML = '';
+            compareBody.appendChild(graphRow('This file could not be read as a project.', ''));
+        }
+    }
+
+    function closeCompare() {
+        compareOverlay.classList.add('hidden');
+        compareModal.classList.add('hidden');
+    }
+
+    document.getElementById('compare-btn').addEventListener('click', (e) => { e.preventDefault(); compareInput.click(); });
+    compareInput.addEventListener('change', () => {
+        const file = compareInput.files[0];
+        compareInput.value = '';
+        if (file) runCompare(file);
+    });
+    document.getElementById('close-compare-modal-btn').addEventListener('click', closeCompare);
+    compareOverlay.addEventListener('click', closeCompare);
+
+    async function copyShareLink() {
+        captureActiveFloor();
+        const payload = JSON.stringify({ canvasData: canvas.toJSON(['data', 'name']), meta: getProjectMeta() });
+        const code = await encodeShare(payload);
+        const link = location.href.split('#')[0] + '#p=' + code;
+        try {
+            await navigator.clipboard.writeText(link);
+            toolTip.innerText = `Share link copied (${Math.max(1, Math.round(link.length / 1024))} KB).` + (link.length > 60000 ? ' It is long, so some chat apps may cut it. Use Save for big plans.' : '');
+        } catch (err) {
+            prompt('Copy this link:', link);
+        }
+    }
+
+    async function openFromHash() {
+        const match = location.hash.match(/^#p=(.+)$/);
+        if (!match) return false;
+        try {
+            const text = await decodeShare(match[1]);
+            history.replaceState(null, '', location.pathname + location.search);
+            if (confirm('Open the plan from this shared link? It replaces the current canvas.')) openProjectFile(new File([text], 'shared.gncad', { type: 'application/json' }));
+        } catch (err) {
+            alert('This share link could not be opened.');
+        }
+        return true;
+    }
+
+    document.getElementById('share-btn').addEventListener('click', (e) => { e.preventDefault(); copyShareLink(); });
+
+    const view3dModal = document.getElementById('view3d-modal');
+    const view3dOverlay = document.getElementById('view3d-modal-overlay');
+    const view3dCanvas = document.getElementById('view3d-canvas');
+    let viewer3d = null;
+
+    function viewColors() {
+        const dark = document.body.classList.contains('dark-theme');
+        return {
+            bg: cssVar('--bg-main'),
+            wall: dark ? [215, 215, 222] : [96, 98, 112],
+            room: dark ? 'rgba(66,133,244,0.28)' : 'rgba(66,133,244,0.22)',
+            edge: dark ? 'rgba(0,0,0,0.55)' : 'rgba(255,255,255,0.55)'
+        };
+    }
+
+    function roomOutline(o) {
+        if (o.type === 'polygon') {
+            const m = o.calcTransformMatrix();
+            const off = o.pathOffset || { x: 0, y: 0 };
+            return o.points.map(p => fabric.util.transformPoint({ x: p.x - off.x, y: p.y - off.y }, m));
+        }
+        return o.getCoords().map(p => ({ x: p.x, y: p.y }));
+    }
+
+    async function buildViewModel() {
+        captureActiveFloor();
+        const height = Math.min(6, Math.max(2, parseFloat(document.getElementById('view3d-height').value) || 2.7));
+        const only = !document.getElementById('view3d-all').checked;
+        const list = only ? floors.filter(f => f.id === activeFloorId) : floors;
+        const model = { ppm: PIXELS_PER_METER, height: height, floors: [] };
+        for (const floor of list) {
+            const objs = await enlivenFloorObjects(floor);
+            const wallObjs = objs.filter(o => o.data && o.data.type === 'wall-system' && Array.isArray(o.points));
+            const graph = buildGraph(wallObjs.map(w => ({ points: getWallAbsPoints(w).map(p => ({ x: p.x, y: p.y })), thickness: w.strokeWidth || 1, layer: 'walls' })), NORMALIZE_TOL);
+            model.floors.push({
+                walls: graph.edges.map(e => ({ a: graph.nodes[e.a], b: graph.nodes[e.b], t: e.thickness })),
+                rooms: objs.filter(o => o.data && o.data.type === 'room').map(o => ({ points: roomOutline(o), fill: null }))
+            });
+        }
+        return model;
+    }
+
+    async function refreshView3d() {
+        if (!viewer3d) viewer3d = createViewer(view3dCanvas, viewColors);
+        viewer3d.setModel(await buildViewModel());
+    }
+
+    document.getElementById('view3d-btn').addEventListener('click', (e) => {
+        e.preventDefault();
+        view3dOverlay.classList.remove('hidden');
+        view3dModal.classList.remove('hidden');
+        refreshView3d();
+    });
+    function closeView3d() {
+        view3dOverlay.classList.add('hidden');
+        view3dModal.classList.add('hidden');
+    }
+    document.getElementById('close-view3d-modal-btn').addEventListener('click', closeView3d);
+    view3dOverlay.addEventListener('click', closeView3d);
+    document.getElementById('view3d-height').addEventListener('change', refreshView3d);
+    document.getElementById('view3d-all').addEventListener('change', refreshView3d);
+    document.getElementById('view3d-reset').addEventListener('click', () => { if (viewer3d) viewer3d.reset(); });
+    window.addEventListener('resize', () => { if (viewer3d && !view3dModal.classList.contains('hidden')) viewer3d.draw(); });
+
+    let resizeFrame = 0;
+    function handleResize() {
+        const w = canvasContainer.offsetWidth;
+        const h = canvasContainer.offsetHeight;
+        if (!w || !h || (canvas.getWidth() === w && canvas.getHeight() === h)) return;
+        canvas.setDimensions({ width: w, height: h });
+        canvas.calcOffset();
+        setupRulers();
+        canvas.requestRenderAll();
+    }
+    if (window.ResizeObserver) {
+        new ResizeObserver(() => {
+            cancelAnimationFrame(resizeFrame);
+            resizeFrame = requestAnimationFrame(handleResize);
+        }).observe(canvasContainer);
+    }
+    window.addEventListener('orientationchange', () => setTimeout(handleResize, 250));
+
     function init() {
         canvas.backgroundColor = createGridPattern();
         canvas.renderAll();
@@ -2704,6 +3933,9 @@ let roomColorIndex = 0;
         setMode('select');
         updateUndoRedoButtons();
         saveState();
+        applyAllSettings();
+        if (!location.hash.startsWith('#p=')) offerAutosaveRestore();
+        else openFromHash();
     }
     
     init();

@@ -134,7 +134,7 @@ function shoelace(points) {
     return sum / 2;
 }
 
-export function findFaces(graph, minArea) {
+function traceFaces(graph) {
     const alive = graph.edges.map(() => true);
     const degree = graph.adjacency.map(list => list.length);
     const queue = [];
@@ -190,7 +190,15 @@ export function findFaces(graph, minArea) {
         });
     });
 
-    return faces.filter(f => f.area > minArea && f.points.length >= 3);
+    return faces;
+}
+
+export function findFaces(graph, minArea) {
+    return traceFaces(graph).filter(f => f.area > minArea && f.points.length >= 3);
+}
+
+export function findOuterBoundaries(graph, minArea) {
+    return traceFaces(graph).filter(f => f.area < -minArea && f.points.length >= 3);
 }
 
 export function faceInfo(graph, face) {
@@ -269,4 +277,56 @@ export function mergeChains(walls, tol) {
         }
     }
     return chains.filter(c => c.members.length > 1);
+}
+
+export function pointInPolygon(p, polygon) {
+    let inside = false;
+    for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+        const a = polygon[i];
+        const b = polygon[j];
+        if ((a.y > p.y) !== (b.y > p.y) && p.x < (b.x - a.x) * (p.y - a.y) / (b.y - a.y) + a.x) inside = !inside;
+    }
+    return inside;
+}
+
+export function chainsFromGraph(graph, walls) {
+    function attrKey(e) {
+        const w = walls[e.walls[0]];
+        return (w.layer || 'walls') + '|' + (Math.round(e.thickness * 1000) / 1000);
+    }
+    function breaksAt(n) {
+        const list = graph.adjacency[n];
+        if (list.length !== 2) return true;
+        return attrKey(graph.edges[list[0]]) !== attrKey(graph.edges[list[1]]);
+    }
+    const used = new Set();
+    const chains = [];
+    function walk(startEdge, startNode) {
+        const first = graph.edges[startEdge];
+        const ids = [startNode];
+        let node = startNode;
+        let eid = startEdge;
+        for (let guard = 0; guard < 100000; guard++) {
+            used.add(eid);
+            const e = graph.edges[eid];
+            node = e.a === node ? e.b : e.a;
+            ids.push(node);
+            if (breaksAt(node)) break;
+            const next = graph.adjacency[node].find(id => id !== eid);
+            if (next === undefined || used.has(next)) break;
+            eid = next;
+        }
+        chains.push({
+            points: ids.map(id => ({ x: graph.nodes[id].x, y: graph.nodes[id].y })),
+            layer: walls[first.walls[0]].layer || 'walls',
+            thickness: first.thickness,
+            source: first.walls[0]
+        });
+    }
+    graph.nodes.forEach(n => {
+        if (!breaksAt(n.id)) return;
+        graph.adjacency[n.id].forEach(eid => { if (!used.has(eid)) walk(eid, n.id); });
+    });
+    graph.edges.forEach(e => { if (!used.has(e.id)) walk(e.id, e.a); });
+    return chains;
 }

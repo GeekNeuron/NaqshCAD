@@ -57,6 +57,7 @@ export function createHistoryManager(canvas, { undoBtn, redoBtn, onRestore, onCh
     let history = [];
     let redoStack = [];
     let isProcessingHistory = false;
+    let limit = HISTORY_LIMIT;
 
     function notify() {
         if (undoBtn) undoBtn.disabled = history.length <= 1;
@@ -80,7 +81,7 @@ export function createHistoryManager(canvas, { undoBtn, redoBtn, onRestore, onCh
             label: label || diffLabel(previous, summary),
             time: Date.now()
         });
-        if (history.length > HISTORY_LIMIT) history.shift();
+        while (history.length > limit) history.shift();
         notify();
     }
 
@@ -117,6 +118,12 @@ export function createHistoryManager(canvas, { undoBtn, redoBtn, onRestore, onCh
         restore(history[history.length - 1]);
     }
 
+    function setLimit(n) {
+        limit = Math.max(2, n);
+        while (history.length > limit) history.shift();
+        notify();
+    }
+
     function reset() {
         history = [];
         redoStack = [];
@@ -143,5 +150,11 @@ export function createHistoryManager(canvas, { undoBtn, redoBtn, onRestore, onCh
         notify();
     }
 
-    return { saveState, undo, redo, jumpTo, updateUndoRedoButtons, reset, getEntries, exportState, importState };
+    function replaceInStates(from, to) {
+        const needle = '"' + from + '"';
+        const swap = '"' + to + '"';
+        history.concat(redoStack).forEach(e => { e.json = e.json.split(needle).join(swap); });
+    }
+
+    return { setLimit, replaceInStates, saveState, undo, redo, jumpTo, updateUndoRedoButtons, reset, getEntries, exportState, importState };
 }
