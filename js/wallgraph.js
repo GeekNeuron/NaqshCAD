@@ -65,11 +65,37 @@ export function buildGraph(walls, tol) {
         }
     });
 
+    const cell = Math.max(tol * 4, 64);
+    const buckets = new Map();
+    const cellRange = (seg) => ({
+        x0: Math.floor((Math.min(seg.a.x, seg.b.x) - tol) / cell),
+        x1: Math.floor((Math.max(seg.a.x, seg.b.x) + tol) / cell),
+        y0: Math.floor((Math.min(seg.a.y, seg.b.y) - tol) / cell),
+        y1: Math.floor((Math.max(seg.a.y, seg.b.y) + tol) / cell)
+    });
+    segments.forEach((seg, i) => {
+        const r = cellRange(seg);
+        for (let cx = r.x0; cx <= r.x1; cx++) {
+            for (let cy = r.y0; cy <= r.y1; cy++) {
+                const k = cx + ':' + cy;
+                if (!buckets.has(k)) buckets.set(k, []);
+                buckets.get(k).push(i);
+            }
+        }
+    });
+
     for (let i = 0; i < segments.length; i++) {
         const s = segments[i];
         const len = distance(s.a, s.b);
-        for (let j = 0; j < segments.length; j++) {
-            if (i === j) continue;
+        const r = cellRange(s);
+        const candidates = new Set();
+        for (let cx = r.x0; cx <= r.x1; cx++) {
+            for (let cy = r.y0; cy <= r.y1; cy++) {
+                const list = buckets.get(cx + ':' + cy);
+                if (list) list.forEach(j => { if (j !== i) candidates.add(j); });
+            }
+        }
+        candidates.forEach(j => {
             const t = segments[j];
             [t.a, t.b].forEach(p => {
                 const pr = projectParam(p, s.a, s.b);
@@ -77,7 +103,7 @@ export function buildGraph(walls, tol) {
             });
             const hit = intersectParams(s.a, s.b, t.a, t.b);
             if (hit && hit.u > 0 && hit.u < 1 && hit.v > 0 && hit.v < 1 && hit.u * len > tol && (1 - hit.u) * len > tol) s.cuts.push(hit.u);
-        }
+        });
     }
 
     const index = createNodeIndex(tol);

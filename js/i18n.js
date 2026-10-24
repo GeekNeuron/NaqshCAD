@@ -9,6 +9,11 @@ let language = 'en';
 let digits = false;
 let observer = null;
 let busy = false;
+const makeRef = typeof WeakRef === 'function' ? (n) => new WeakRef(n) : (n) => ({ deref: () => n });
+const trackedText = new Set();
+const trackedNodes = new WeakSet();
+const trackedElements = new Set();
+const trackedEls = new WeakSet();
 
 function toDigits(text) {
     return text.replace(/[0-9]/g, d => PERSIAN_DIGITS[Number(d)]);
@@ -42,6 +47,7 @@ function processTextNode(node) {
     if (next !== original) {
         textApplied.set(node, next);
         node.nodeValue = next;
+        if (!trackedNodes.has(node)) { trackedNodes.add(node); trackedText.add(makeRef(node)); }
     } else {
         textApplied.delete(node);
     }
@@ -57,6 +63,7 @@ function processElementAttrs(el) {
         store[attr] = { original: current, applied: next };
         attrOriginal.set(el, store);
         if (next !== current) el.setAttribute(attr, next);
+        if (!trackedEls.has(el)) { trackedEls.add(el); trackedElements.add(makeRef(el)); }
     });
 }
 
@@ -87,24 +94,24 @@ function applyAll() {
 
 function revertAll() {
     busy = true;
-    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT);
-    let node = walker.nextNode();
-    while (node) {
-        if (node.nodeType === 3) {
-            const applied = textApplied.get(node);
-            if (applied !== undefined && node.nodeValue === applied) node.nodeValue = textOriginal.get(node);
-            textApplied.delete(node);
-        } else {
-            const store = attrOriginal.get(node);
-            if (store) {
-                Object.keys(store).forEach(attr => {
-                    if (node.getAttribute(attr) === store[attr].applied) node.setAttribute(attr, store[attr].original);
-                });
-                attrOriginal.delete(node);
-            }
+    trackedText.forEach(ref => {
+        const node = ref.deref();
+        if (!node) { trackedText.delete(ref); return; }
+        const applied = textApplied.get(node);
+        if (applied !== undefined && node.nodeValue === applied) node.nodeValue = textOriginal.get(node);
+        textApplied.delete(node);
+    });
+    trackedElements.forEach(ref => {
+        const el = ref.deref();
+        if (!el) { trackedElements.delete(ref); return; }
+        const store = attrOriginal.get(el);
+        if (store) {
+            Object.keys(store).forEach(attr => {
+                if (el.getAttribute(attr) === store[attr].applied) el.setAttribute(attr, store[attr].original);
+            });
+            attrOriginal.delete(el);
         }
-        node = walker.nextNode();
-    }
+    });
     busy = false;
 }
 

@@ -87,6 +87,28 @@ export function createViewer(canvasEl, getColors) {
                 quads.forEach((q, k) => faces.push({ pts: q, fill: shade(colors.wall, k === 4 ? { x: 0, y: 1, z: 0 } : cross(q[0], q[1], q[2])) }));
             });
         });
+        model.floors.forEach((floor, i) => {
+            const base = i * (model.height + 0.2);
+            (floor.boxes || []).forEach(box => {
+                const rad = box.angle * Math.PI / 180;
+                const cos = Math.cos(rad);
+                const sin = Math.sin(rad);
+                const hw = box.w / ppm / 2;
+                const hd = box.d / ppm / 2;
+                const corner = (lx, lz, y) => ({ x: box.cx / ppm + lx * cos - lz * sin, y: base + y, z: box.cy / ppm + lx * sin + lz * cos });
+                const y0 = box.y0;
+                const y1 = box.y0 + box.h;
+                const rgb = box.kind === 'door' ? [160, 105, 60] : (box.kind === 'window' ? [110, 180, 240] : [135, 150, 175]);
+                const ring = [[-hw, -hd], [hw, -hd], [hw, hd], [-hw, hd]];
+                for (let k = 0; k < 4; k++) {
+                    const a = ring[k];
+                    const b = ring[(k + 1) % 4];
+                    const q = [corner(a[0], a[1], y0), corner(b[0], b[1], y0), corner(b[0], b[1], y1), corner(a[0], a[1], y1)];
+                    faces.push({ pts: q, fill: shade(rgb, cross(q[0], q[1], q[2])) });
+                }
+                faces.push({ pts: ring.map(r => corner(r[0], r[1], y1)), fill: shade(rgb, { x: 0, y: 1, z: 0 }) });
+            });
+        });
         return { floors, faces };
     }
 
@@ -130,6 +152,7 @@ export function createViewer(canvasEl, getColors) {
         model.floors.forEach(f => {
             f.walls.forEach(w => { mark(w.a.x / model.ppm, w.a.y / model.ppm); mark(w.b.x / model.ppm, w.b.y / model.ppm); });
             f.rooms.forEach(r => r.points.forEach(p => mark(p.x / model.ppm, p.y / model.ppm)));
+            (f.boxes || []).forEach(b => mark(b.cx / model.ppm, b.cy / model.ppm));
         });
         if (!isFinite(minX)) { minX = 0; maxX = 10; minZ = 0; maxZ = 10; }
         const totalHeight = model.floors.length * (model.height + 0.2);

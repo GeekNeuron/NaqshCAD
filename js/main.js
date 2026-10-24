@@ -140,7 +140,7 @@ let roomColorIndex = 0;
     }
 
     function createHatchPattern(type, baseColor) {
-        const size = 16;
+        const size = (type === 'wood' || type === 'brick') ? 32 : 16;
         const c = document.createElement('canvas');
         c.width = size; c.height = size;
         const ctx = c.getContext('2d');
@@ -166,6 +166,41 @@ let roomColorIndex = 0;
             ctx.fill();
         } else if (type === 'grid') {
             ctx.strokeRect(0.5, 0.5, size - 1, size - 1);
+        } else if (type === 'wood') {
+            ctx.fillStyle = withAlpha(baseColor, 0.3);
+            ctx.fillRect(0, 0, size, size);
+            ctx.beginPath();
+            [0, 8, 16, 24].forEach(y => { ctx.moveTo(0, y + 0.5); ctx.lineTo(size, y + 0.5); });
+            ctx.moveTo(10, 0); ctx.lineTo(10, 8);
+            ctx.moveTo(26, 8); ctx.lineTo(26, 16);
+            ctx.moveTo(4, 16); ctx.lineTo(4, 24);
+            ctx.moveTo(20, 24); ctx.lineTo(20, 32);
+            ctx.stroke();
+        } else if (type === 'checker') {
+            ctx.fillStyle = withAlpha(baseColor, 0.55);
+            ctx.fillRect(0, 0, size / 2, size / 2);
+            ctx.fillRect(size / 2, size / 2, size / 2, size / 2);
+        } else if (type === 'brick') {
+            ctx.fillStyle = withAlpha(baseColor, 0.3);
+            ctx.fillRect(0, 0, size, size);
+            ctx.beginPath();
+            [0, 8, 16, 24].forEach(y => { ctx.moveTo(0, y + 0.5); ctx.lineTo(size, y + 0.5); });
+            [[0, 8], [16, 24]].forEach(([a, b]) => {
+                ctx.moveTo(a === 0 ? 0.5 : 16.5, 0); ctx.lineTo(a === 0 ? 0.5 : 16.5, 8);
+                ctx.moveTo(b === 8 ? 8.5 : 24.5, 8); ctx.lineTo(b === 8 ? 8.5 : 24.5, 16);
+            });
+            ctx.moveTo(0.5, 16); ctx.lineTo(0.5, 24);
+            ctx.moveTo(16.5, 16); ctx.lineTo(16.5, 24);
+            ctx.moveTo(8.5, 24); ctx.lineTo(8.5, 32);
+            ctx.moveTo(24.5, 24); ctx.lineTo(24.5, 32);
+            ctx.stroke();
+        } else if (type === 'concrete') {
+            ctx.fillStyle = withAlpha(baseColor, 0.7);
+            [[2, 3], [7, 11], [12, 5], [4, 14], [14, 13], [9, 8], [1, 9], [15, 2], [6, 1], [11, 15]].forEach(([x, y]) => {
+                ctx.beginPath();
+                ctx.arc(x, y, 0.8, 0, Math.PI * 2);
+                ctx.fill();
+            });
         }
         return new fabric.Pattern({ source: c, repeat: 'repeat' });
     }
@@ -185,7 +220,7 @@ let roomColorIndex = 0;
         label.innerText = 'Fill Pattern';
         propItem.appendChild(label);
         const select = document.createElement('select');
-        [['solid', 'Solid'], ['diagonal', 'Diagonal Hatch'], ['cross', 'Cross Hatch'], ['dots', 'Dots'], ['grid', 'Tile Grid']].forEach(([value, text]) => {
+        [['solid', 'Solid'], ['diagonal', 'Diagonal Hatch'], ['cross', 'Cross Hatch'], ['dots', 'Dots'], ['grid', 'Tile Grid'], ['wood', 'Wood Planks'], ['checker', 'Checker Tile'], ['brick', 'Brick'], ['concrete', 'Concrete']].forEach(([value, text]) => {
             const opt = document.createElement('option');
             opt.value = value;
             opt.innerText = text;
@@ -2035,7 +2070,7 @@ let roomColorIndex = 0;
     }
 
     document.getElementById('chamfer-apply-btn').addEventListener('click', () => {
-        chamferDistance = parseFloat(document.getElementById('chamfer-distance').value) || 0.3;
+        chamferDistance = fromDisplayLength(parseFloat(document.getElementById('chamfer-distance').value)) || 0.3;
         closeChamferModal();
         activateChamferInteractiveMode();
     });
@@ -2060,7 +2095,7 @@ let roomColorIndex = 0;
     }
 
     document.getElementById('fillet-apply-btn').addEventListener('click', () => {
-        filletRadius = parseFloat(document.getElementById('fillet-radius').value) || 0.5;
+        filletRadius = fromDisplayLength(parseFloat(document.getElementById('fillet-radius').value)) || 0.5;
         closeFilletModal();
         activateFilletInteractiveMode();
     });
@@ -2394,6 +2429,8 @@ let roomColorIndex = 0;
         const graph = buildGraph(records, NORMALIZE_TOL);
         const chains = chainsFromGraph(graph, records);
         const template = walls[0];
+        const priorRender = canvas.renderOnAddRemove;
+        canvas.renderOnAddRemove = false;
         walls.forEach(w => canvas.remove(w));
         chains.forEach(chain => {
             const src = walls[chain.source] || template;
@@ -2401,6 +2438,7 @@ let roomColorIndex = 0;
             wall.set('strokeWidth', chain.thickness);
             canvas.add(wall);
         });
+        canvas.renderOnAddRemove = priorRender;
         canvas.discardActiveObject();
         canvas.renderAll();
         if (announce) {
@@ -2449,6 +2487,8 @@ let roomColorIndex = 0;
         const parsed = deserializeWallGraph(data);
         if (!parsed) return false;
         const chains = chainsFromGraph(parsed.graph, parsed.layers);
+        const priorRender = canvas.renderOnAddRemove;
+        canvas.renderOnAddRemove = false;
         collectWalls().forEach(w => canvas.remove(w));
         const template = { stroke: cssVar('--text-primary'), strokeWidth: 1 };
         chains.forEach(chain => {
@@ -2456,6 +2496,7 @@ let roomColorIndex = 0;
             wall.set('strokeWidth', chain.thickness);
             canvas.add(wall);
         });
+        canvas.renderOnAddRemove = priorRender;
         canvas.renderAll();
         return true;
     }
@@ -2756,6 +2797,45 @@ let roomColorIndex = 0;
             { id: 'sym-washer-hookup', name: 'Washer Hookup', file: 'sym_washer_hookup.png', sizeMeters: 0.15 },
             { id: 'sym-gas-line', name: 'Gas Line', file: 'sym_gas_line.png', sizeMeters: 0.15 },
         ],
+        'More Furniture': [
+            { id: 'l-sofa', name: 'L-Shaped Sofa', file: 'l-sofa.svg', sizeMeters: 2.4 },
+            { id: 'ottoman', name: 'Ottoman', file: 'ottoman.svg', sizeMeters: 0.5 },
+            { id: 'bench', name: 'Bench', file: 'bench.svg', sizeMeters: 1.2 },
+            { id: 'recliner', name: 'Recliner', file: 'recliner.svg', sizeMeters: 0.9 },
+            { id: 'king-bed', name: 'King Bed', file: 'king-bed.svg', sizeMeters: 2.1 },
+            { id: 'bunk-bed', name: 'Bunk Bed', file: 'bunk-bed.svg', sizeMeters: 2.0 },
+            { id: 'crib', name: 'Crib', file: 'crib.svg', sizeMeters: 1.3 },
+            { id: 'bar-stool', name: 'Bar Stool', file: 'bar-stool.svg', sizeMeters: 0.4 },
+            { id: 'kitchen-island', name: 'Kitchen Island', file: 'kitchen-island.svg', sizeMeters: 2.0 },
+            { id: 'vanity', name: 'Bathroom Vanity', file: 'vanity.svg', sizeMeters: 1.2 },
+            { id: 'bidet', name: 'Bidet', file: 'bidet.svg', sizeMeters: 0.7 },
+            { id: 'towel-rail', name: 'Towel Rail', file: 'towel-rail.svg', sizeMeters: 0.6 },
+            { id: 'corner-desk', name: 'Corner Desk', file: 'corner-desk.svg', sizeMeters: 1.6 },
+            { id: 'file-cabinet', name: 'Filing Cabinet', file: 'file-cabinet.svg', sizeMeters: 0.5 },
+            { id: 'tv-unit', name: 'TV Wall Unit', file: 'tv-unit.svg', sizeMeters: 2.4 },
+            { id: 'aquarium', name: 'Aquarium', file: 'aquarium.svg', sizeMeters: 1.0 },
+            { id: 'treadmill', name: 'Treadmill', file: 'treadmill.svg', sizeMeters: 1.8 },
+            { id: 'exercise-bike', name: 'Exercise Bike', file: 'exercise-bike.svg', sizeMeters: 1.0 },
+            { id: 'bean-bag', name: 'Bean Bag', file: 'bean-bag.svg', sizeMeters: 0.9 },
+            { id: 'shoe-rack', name: 'Shoe Rack', file: 'shoe-rack.svg', sizeMeters: 0.8 },
+            { id: 'laundry-basket', name: 'Laundry Basket', file: 'laundry-basket.svg', sizeMeters: 0.5 },
+            { id: 'trash-bin', name: 'Trash Bin', file: 'trash-bin.svg', sizeMeters: 0.4 },
+            { id: 'wine-rack', name: 'Wine Rack', file: 'wine-rack.svg', sizeMeters: 0.8 },
+            { id: 'pool-table', name: 'Pool Table', file: 'pool-table.svg', sizeMeters: 2.4 },
+        ],
+        'Vehicles & Outdoor': [
+            { id: 'car', name: 'Car', file: 'car.svg', sizeMeters: 4.5 },
+            { id: 'bicycle', name: 'Bicycle', file: 'bicycle.svg', sizeMeters: 1.8 },
+            { id: 'motorcycle', name: 'Motorcycle', file: 'motorcycle.svg', sizeMeters: 2.1 },
+            { id: 'parking', name: 'Parking Space', file: 'parking.svg', sizeMeters: 5.0 },
+            { id: 'gate', name: 'Gate', file: 'gate.svg', sizeMeters: 3.0 },
+            { id: 'fence', name: 'Fence', file: 'fence.svg', sizeMeters: 3.0 },
+            { id: 'patio-table', name: 'Patio Table', file: 'patio-table.svg', sizeMeters: 1.5 },
+            { id: 'sun-lounger', name: 'Sun Lounger', file: 'sun-lounger.svg', sizeMeters: 1.9 },
+            { id: 'hot-tub', name: 'Hot Tub', file: 'hot-tub.svg', sizeMeters: 2.0 },
+            { id: 'shed', name: 'Garden Shed', file: 'shed.svg', sizeMeters: 3.0 },
+            { id: 'trampoline', name: 'Trampoline', file: 'trampoline.svg', sizeMeters: 3.0 },
+        ],
         'MEP Symbols': [
             { id: 'sym-data-outlet', name: 'Data Outlet', file: 'sym-data-outlet.svg', sizeMeters: 0.15 },
             { id: 'sym-tv-point', name: 'TV Point', file: 'sym-tv-point.svg', sizeMeters: 0.15 },
@@ -2947,7 +3027,7 @@ let roomColorIndex = 0;
     document.getElementById('svg-add-btn').addEventListener('click', () => {
         if (!pendingSvg) return;
         const name = document.getElementById('svg-name').value.trim() || 'Symbol';
-        const sizeMeters = parseFloat(document.getElementById('svg-size').value);
+        const sizeMeters = fromDisplayLength(parseFloat(document.getElementById('svg-size').value));
         if (!(sizeMeters > 0)) {
             alert('Enter a size greater than zero.');
             return;
@@ -3259,7 +3339,7 @@ let roomColorIndex = 0;
             else document.body.style.setProperty('--accent-primary', v);
             drawRulers();
         },
-        language: () => setLanguage(settings.language, settings.persianDigits),
+        language: () => { setLanguage(settings.language, settings.persianDigits); syncToolInputs(); },
         persianDigits: () => setLanguage(settings.language, settings.persianDigits),
         reduceMotion: (v) => document.body.classList.toggle('reduce-motion', !!v),
         largeTargets: (v) => document.body.classList.toggle('large-targets', !!v),
@@ -3273,8 +3353,8 @@ let roomColorIndex = 0;
             currentStrokeWidth = Number(v);
             wallThicknessSelector.querySelectorAll('.thickness-option').forEach(el => el.classList.toggle('active', parseInt(el.dataset.thickness, 10) === Number(v)));
         },
-        filletRadius: (v) => { filletRadius = v; document.getElementById('fillet-radius').value = v; },
-        chamferDistance: (v) => { chamferDistance = v; document.getElementById('chamfer-distance').value = v; },
+        filletRadius: (v) => { filletRadius = v; syncToolInputs(); },
+        chamferDistance: (v) => { chamferDistance = v; syncToolInputs(); },
         graphAuto: (v, fromUser) => {
             graphAuto = !!v && FEATURES.normalizeWalls;
             graphAutoToggle.checked = graphAuto;
@@ -3286,6 +3366,7 @@ let roomColorIndex = 0;
         confirmDestructive: () => {},
         units: (v) => {
             setUnitSystem(v);
+            syncToolInputs();
             canvas.getObjects().filter(o => o.data && o.data.type === 'room' && o._objects && o._objects.some(c => c.data && c.data.type === 'width')).forEach(g => updateRoomDimensions(g));
             updatePropertiesPanel(canvas.getActiveObject());
             canvas.requestRenderAll();
@@ -3332,7 +3413,7 @@ let roomColorIndex = 0;
                 }
                 const label = document.createElement('span');
                 label.className = 'setting-label';
-                label.textContent = item.label;
+                label.textContent = (item.key === 'filletRadius' || item.key === 'chamferDistance') ? item.label.replace('(m)', `(${lengthUnit()})`) : item.label;
                 let control;
                 if (item.type === 'toggle') {
                     control = document.createElement('label');
@@ -3357,10 +3438,11 @@ let roomColorIndex = 0;
                 } else {
                     control = document.createElement('input');
                     control.type = 'number';
-                    control.min = item.min;
-                    control.max = item.max;
+                    const metric = item.key === 'filletRadius' || item.key === 'chamferDistance';
+                    control.min = metric ? Number(toDisplayLength(item.min).toFixed(2)) : item.min;
+                    control.max = metric ? Number(toDisplayLength(item.max).toFixed(2)) : item.max;
                     control.step = item.step;
-                    control.value = settings[item.key];
+                    control.value = metric ? Number(toDisplayLength(settings[item.key]).toFixed(2)) : settings[item.key];
                     control.dataset.key = item.key;
                 }
                 row.append(label, control);
@@ -3403,12 +3485,13 @@ let roomColorIndex = 0;
         else {
             value = parseFloat(e.target.value);
             if (!isFinite(value)) value = DEFAULT_SETTINGS[key];
+            if (key === 'filletRadius' || key === 'chamferDistance') value = fromDisplayLength(value);
             value = Math.min(item.max, Math.max(item.min, value));
         }
         settings[key] = value;
         saveSettings(settings);
         applySetting(key, true);
-        if (item.type === 'number') e.target.value = value;
+        if (item.type === 'number') e.target.value = (key === 'filletRadius' || key === 'chamferDistance') ? Number(toDisplayLength(value).toFixed(2)) : value;
     });
 
     function replaceSettings(next) {
@@ -3868,9 +3951,39 @@ let roomColorIndex = 0;
         return o.getCoords().map(p => ({ x: p.x, y: p.y }));
     }
 
+
+    function viewBoxFor(o) {
+        const c = o.getCenterPoint();
+        const kind = o.data.type;
+        const name = String(o.data.name || '');
+        let w = o.getScaledWidth();
+        let d = o.getScaledHeight();
+        let y0 = 0;
+        let h = 0.55;
+        if (kind === 'door' || kind === 'window') {
+            w = o.data.width || w;
+            d = 8;
+            h = kind === 'door' ? 2.1 : 1.2;
+            y0 = kind === 'door' ? 0 : 0.9;
+        } else if (kind === 'stairs') {
+            h = 1.2;
+        } else if (/Rug|Runner/.test(name)) {
+            h = 0.03;
+        } else if (/Wardrobe|Fridge|Bookshelf|Cabinet|Tree|Plant|Shower|Boiler|Rack|Piano|Aquarium|Distribution/.test(name)) {
+            h = 1.8;
+        } else if (/Lamp|Chandelier/.test(name)) {
+            h = 1.4;
+        } else if (/Sofa|Bed|Chair|Armchair|Loveseat|Bench|Recliner|Ottoman|Stool/.test(name)) {
+            h = 0.5;
+        } else if (/Table|Desk|Counter|Island|Vanity|Stove|Oven/.test(name)) {
+            h = 0.8;
+        }
+        return { cx: c.x, cy: c.y, w: w, d: d, angle: o.angle || 0, y0: y0, h: h, kind: kind };
+    }
+
     async function buildViewModel() {
         captureActiveFloor();
-        const height = Math.min(6, Math.max(2, parseFloat(document.getElementById('view3d-height').value) || 2.7));
+        const height = Math.min(6, Math.max(2, fromDisplayLength(parseFloat(document.getElementById('view3d-height').value)) || 2.7));
         const only = !document.getElementById('view3d-all').checked;
         const list = only ? floors.filter(f => f.id === activeFloorId) : floors;
         const model = { ppm: PIXELS_PER_METER, height: height, floors: [] };
@@ -3880,7 +3993,8 @@ let roomColorIndex = 0;
             const graph = buildGraph(wallObjs.map(w => ({ points: getWallAbsPoints(w).map(p => ({ x: p.x, y: p.y })), thickness: w.strokeWidth || 1, layer: 'walls' })), NORMALIZE_TOL);
             model.floors.push({
                 walls: graph.edges.map(e => ({ a: graph.nodes[e.a], b: graph.nodes[e.b], t: e.thickness })),
-                rooms: objs.filter(o => o.data && o.data.type === 'room').map(o => ({ points: roomOutline(o), fill: null }))
+                rooms: objs.filter(o => o.data && o.data.type === 'room').map(o => ({ points: roomOutline(o), fill: null })),
+                boxes: objs.filter(o => o.data && ['door', 'window', 'furniture', 'stairs'].includes(o.data.type)).map(o => viewBoxFor(o))
             });
         }
         return model;
@@ -3907,6 +4021,33 @@ let roomColorIndex = 0;
     document.getElementById('view3d-all').addEventListener('change', refreshView3d);
     document.getElementById('view3d-reset').addEventListener('click', () => { if (viewer3d) viewer3d.reset(); });
     window.addEventListener('resize', () => { if (viewer3d && !view3dModal.classList.contains('hidden')) viewer3d.draw(); });
+
+
+    function setUnitLabel(el, base) {
+        if (!el) return;
+        const text = lengthUnit() === 'ft' ? base.replace('(m', '(ft') : base;
+        const node = Array.from(el.childNodes).find(n => n.nodeType === 3 && n.nodeValue.trim());
+        if (node) node.nodeValue = node.nodeValue.replace(/\S[\s\S]*\S|\S/, text);
+    }
+
+    function syncToolInputs() {
+        const shown = (meters) => Number(toDisplayLength(meters).toFixed(2));
+        document.getElementById('fillet-radius').value = shown(filletRadius);
+        document.getElementById('chamfer-distance').value = shown(chamferDistance);
+        const svgSize = document.getElementById('svg-size');
+        const height = document.getElementById('view3d-height');
+        if (!svgSize.dataset.meters) svgSize.dataset.meters = '0.6';
+        if (!height.dataset.meters) height.dataset.meters = '2.7';
+        svgSize.value = shown(parseFloat(svgSize.dataset.meters));
+        height.value = shown(parseFloat(height.dataset.meters));
+        setUnitLabel(document.querySelector('label[for="fillet-radius"]'), 'Radius (m)');
+        setUnitLabel(document.querySelector('label[for="chamfer-distance"]'), 'Cut Distance (m)');
+        setUnitLabel(document.querySelector('label[for="svg-size"]'), 'Size on plan (m, longest side)');
+        setUnitLabel(height.parentElement, 'Wall height (m)');
+    }
+
+    document.getElementById('svg-size').addEventListener('input', (e) => { e.target.dataset.meters = String(fromDisplayLength(parseFloat(e.target.value) || 0.6)); });
+    document.getElementById('view3d-height').addEventListener('input', (e) => { e.target.dataset.meters = String(fromDisplayLength(parseFloat(e.target.value) || 2.7)); });
 
     let resizeFrame = 0;
     function handleResize() {
