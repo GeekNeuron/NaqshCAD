@@ -1,0 +1,43 @@
+from playwright.sync_api import sync_playwright
+import json
+with sync_playwright() as p:
+    b=p.chromium.launch()
+    ctx=b.new_context(viewport={'width':1280,'height':760},accept_downloads=True)
+    pg=ctx.new_page(); errs=[]
+    pg.on('console',lambda m: errs.append(m.text) if m.type=='error' else None)
+    pg.on('pageerror',lambda e: errs.append(str(e)))
+    pg.on('dialog',lambda d:d.accept(d.default_value or 'X'))
+    pg.goto('http://localhost:8765/index.html'); pg.wait_for_timeout(700)
+    tb=pg.evaluate("(()=>{const b=document.getElementById('graph-tool-btn');const r=b.getBoundingClientRect();const p=b.parentElement;return {btnBottom:r.bottom,parent:p.id||p.className,parentScrollable:getComputedStyle(p).overflowY,parentH:p.clientHeight,parentScrollH:p.scrollHeight}})()")
+    print('toolbar',tb)
+    box=pg.locator('canvas.upper-canvas').first.bounding_box()
+    def wall(pts):
+        pg.click('#wall-tool-btn'); pg.wait_for_timeout(80)
+        for x,y in pts:
+            pg.mouse.move(box['x']+x,box['y']+y); pg.mouse.click(box['x']+x,box['y']+y); pg.wait_for_timeout(100)
+        pg.click('#select-tool-btn'); pg.wait_for_timeout(250)
+    wall([(200,200),(500,200)]); wall([(500,200),(500,400)]); wall([(500,400),(200,400)]); wall([(200,400),(200,200)])
+    pg.click('#graph-tool-btn'); pg.click('#graph-merge-btn'); pg.wait_for_timeout(200)
+    print(pg.inner_text('#graph-message')); pg.click('#graph-rooms-btn'); pg.wait_for_timeout(300); pg.click('#close-graph-modal-btn')
+    pg.mouse.click(box['x']+350,box['y']+300); pg.wait_for_timeout(400)
+    print('room panel:',pg.inner_text('#panel-content').replace('\n',' | ')[:200])
+    pg.click('#fillet-tool-btn'); pg.fill('#fillet-radius','0.7'); pg.click('#fillet-apply-btn')
+    for pt in [(500,200),(500,400),(200,400),(200,200)]:
+        pg.mouse.click(box['x']+pt[0],box['y']+pt[1]); pg.wait_for_timeout(300)
+    print('tip',pg.inner_text('#tool-tip'))
+    pg.click('#select-tool-btn'); pg.wait_for_timeout(200)
+    pg.screenshot(path='/tmp/t/C2_fillet_merged.png')
+    pg.click('#file-menu-btn')
+    with pg.expect_download() as d: pg.click('#save-btn')
+    d.value.save_as('/tmp/t/g.gncad'); data=json.load(open('/tmp/t/g.gncad'))
+    print('saved types',[(o['type'],(o.get('data') or {}).get('type'),bool((o.get('data') or {}).get('graphKey'))) for o in data['canvasData']['objects']])
+    pg.click('#file-menu-btn'); pg.click('#new-btn'); pg.wait_for_timeout(300)
+    pg.set_input_files('#file-input','/tmp/t/g.gncad'); pg.wait_for_timeout(800)
+    pg.click('#graph-tool-btn'); pg.wait_for_timeout(300)
+    print('after reload summary',pg.inner_text('#graph-summary').replace('\n',' | ')[:200])
+    pg.click('#graph-rooms-btn'); pg.wait_for_timeout(300); print('rooms again:',pg.inner_text('#graph-message'))
+    pg.click('#close-graph-modal-btn')
+    pg.click('#file-menu-btn')
+    with pg.expect_download() as d2: pg.click('#export-dxf-btn')
+    d2.value.save_as('/tmp/t/g.dxf'); print('dxf ok', len(open('/tmp/t/g.dxf').read()))
+    print('errs',errs); b.close()

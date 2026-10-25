@@ -1,0 +1,25 @@
+from playwright.sync_api import sync_playwright
+with sync_playwright() as p:
+    b=p.chromium.launch()
+    ctx=b.new_context(viewport={'width':1280,'height':900},accept_downloads=True)
+    pg=ctx.new_page(); errs=[]
+    pg.on('pageerror',lambda e: errs.append(str(e)))
+    pg.on('dialog',lambda d:d.accept(d.default_value or 'X'))
+    pg.goto('http://localhost:8765/index.html'); pg.wait_for_timeout(700)
+    box=pg.locator('canvas.upper-canvas').first.bounding_box()
+    pg.click('#wall-tool-btn')
+    for x,y in [(200,200),(500,200),(500,400)]:
+        pg.mouse.move(box['x']+x,box['y']+y); pg.mouse.click(box['x']+x,box['y']+y); pg.wait_for_timeout(120)
+    pg.keyboard.press('Enter'); pg.wait_for_timeout(300)
+    pg.click('#fillet-tool-btn'); pg.fill('#fillet-radius','9'); pg.click('#fillet-apply-btn')
+    pg.mouse.click(box['x']+500,box['y']+200); pg.wait_for_timeout(400)
+    print('clamped tip:',pg.inner_text('#tool-tip'))
+    pg.click('#select-tool-btn'); pg.mouse.click(box['x']+350,box['y']+200); pg.wait_for_timeout(300)
+    pg.click('#offset-tool-btn'); pg.wait_for_timeout(400)
+    print('labels',[e.text_content() for e in pg.locator('.history-item').all()])
+    pg.screenshot(path='/tmp/t/B2_offset.png')
+    pg.click('#file-menu-btn')
+    with pg.expect_download() as d: pg.click('#export-dxf-btn')
+    d.value.save_as('/tmp/t/out2.dxf'); s=open('/tmp/t/out2.dxf').read()
+    print('dxf polylines',s.count('LWPOLYLINE'),'len',len(s))
+    print('errs',errs); b.close()

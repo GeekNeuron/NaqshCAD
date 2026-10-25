@@ -611,7 +611,7 @@ let roomColorIndex = 0;
             });
             layerSelect.addEventListener('change', (e) => {
                 obj.data.layer = e.target.value;
-                const targetToggle = layerList.querySelector(`.layer-item[data-layer="${e.target.value}"] .visibility-toggle`);
+                const targetToggle = layerList.querySelector(`.layer-item[data-layer="${CSS.escape(e.target.value)}"] .visibility-toggle`);
                 obj.visible = !targetToggle || targetToggle.dataset.visible === 'true';
                 canvas.renderAll();
                 saveState();
@@ -2672,18 +2672,29 @@ let roomColorIndex = 0;
     }
 
     function addCustomLayer(name, existingId) {
-        const id = existingId || ('custom-' + name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '') + '-' + Date.now().toString(36));
-        customLayers.push({ id, name });
+        const safeName = String(name).slice(0, 60);
+        const validId = typeof existingId === 'string' && /^[A-Za-z0-9_-]{1,80}$/.test(existingId) ? existingId : null;
+        const id = validId || ('custom-' + safeName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '') + '-' + Date.now().toString(36));
+        customLayers.push({ id, name: safeName });
         const li = document.createElement('li');
         li.className = 'layer-item custom-layer-item';
         li.dataset.layer = id;
-        li.innerHTML = `<span class="remove-layer-btn">${ICON_X}</span><span>${name}</span><span class="visibility-toggle" data-visible="true">${ICON_EYE}</span>`;
+        const remove = document.createElement('span');
+        remove.className = 'remove-layer-btn';
+        remove.innerHTML = ICON_X;
+        const label = document.createElement('span');
+        label.textContent = safeName;
+        const toggle = document.createElement('span');
+        toggle.className = 'visibility-toggle';
+        toggle.dataset.visible = 'true';
+        toggle.innerHTML = ICON_EYE;
+        li.append(remove, label, toggle);
         layerList.appendChild(li);
     }
 
     function removeCustomLayer(id) {
         customLayers = customLayers.filter(l => l.id !== id);
-        const li = layerList.querySelector(`.layer-item[data-layer="${id}"]`);
+        const li = layerList.querySelector(`.layer-item[data-layer="${CSS.escape(id)}"]`);
         if (li) li.remove();
         canvas.getObjects().forEach(obj => {
             if (obj.data && obj.data.layer === id) {
@@ -4048,6 +4059,16 @@ let roomColorIndex = 0;
 
     document.getElementById('svg-size').addEventListener('input', (e) => { e.target.dataset.meters = String(fromDisplayLength(parseFloat(e.target.value) || 0.6)); });
     document.getElementById('view3d-height').addEventListener('input', (e) => { e.target.dataset.meters = String(fromDisplayLength(parseFloat(e.target.value) || 2.7)); });
+
+
+    function syncAppHeight() {
+        const h = window.visualViewport ? window.visualViewport.height : window.innerHeight;
+        document.documentElement.style.setProperty('--app-height', `${Math.round(h)}px`);
+    }
+    syncAppHeight();
+    window.addEventListener('resize', syncAppHeight);
+    if (window.visualViewport) window.visualViewport.addEventListener('resize', syncAppHeight);
+    window.addEventListener('orientationchange', () => setTimeout(syncAppHeight, 250));
 
     let resizeFrame = 0;
     function handleResize() {
